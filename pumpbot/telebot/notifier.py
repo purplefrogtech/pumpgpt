@@ -29,7 +29,6 @@ def _format_price(value) -> str:
         num = float(value)
     except (TypeError, ValueError):
         return str(value)
-    # human friendly with thousand separator; adaptive decimals
     if abs(num) >= 100:
         return f"{num:,.0f}"
     if abs(num) >= 1:
@@ -49,6 +48,14 @@ def _format_dt(dt_val) -> str:
     return ""
 
 
+def _fmt_pct(val, signed: bool = True) -> str:
+    try:
+        num = float(val)
+        return f"{num:+.1f}%" if signed else f"{num:.1f}%"
+    except Exception:
+        return "—"
+
+
 def format_signal_message(payload: dict) -> str:
     symbol = payload.get("symbol", "—")
     side_raw = str(payload.get("side", "")).upper()
@@ -56,6 +63,14 @@ def format_signal_message(payload: dict) -> str:
     leverage = payload.get("leverage", "—")
     timeframe = payload.get("timeframe", "—")
     strategy = payload.get("strategy", "—")
+    trend_label = payload.get("trend_label") or payload.get("trend_direction") or "—"
+    rsi_val = payload.get("rsi")
+    vol_state = payload.get("volatility_state", "—")
+    volume_change_pct = payload.get("volume_change_pct")
+    success_rate = payload.get("success_rate")
+    risk_reward = payload.get("risk_reward")
+    market_structure = payload.get("market_structure")
+    candle_pattern = payload.get("candle_pattern")
 
     entries: Sequence = payload.get("entry") or []
     if not isinstance(entries, Iterable) or isinstance(entries, (str, bytes)):
@@ -75,9 +90,21 @@ def format_signal_message(payload: dict) -> str:
         "━━━━━━━━━━━━━━━━━━━━━━━━",
         f"📌 <b>{html.escape(str(symbol))}</b> · {side} · {leverage}x",
         f"⏱ Timeframe: {html.escape(str(timeframe))} · Strateji: {html.escape(str(strategy))}",
-        "",
-        "🎯 <b>Entry Bölgesi</b>",
+        f"📈 Trend: {trend_label} | Yapı: {market_structure or '—'}",
+        f"📊 RSI: {rsi_val:.1f}" if isinstance(rsi_val, (int, float)) else f"📊 RSI: {rsi_val or '—'}",
+        f"⚡ Volatilite: {vol_state} | Hacim: {_fmt_pct(volume_change_pct)}",
+        (
+            f"📈 Başarı (30): {_fmt_pct(success_rate, signed=False)} | R:R ≈ {risk_reward:.2f}"
+            if risk_reward
+            else f"📈 Başarı (30): {_fmt_pct(success_rate, signed=False)}"
+        ),
     ]
+
+    if candle_pattern and candle_pattern != "NONE":
+        lines.append(f"🕯 Formasyon: {candle_pattern}")
+
+    lines.append("")
+    lines.append("🎯 <b>Entry Bölgesi</b>")
 
     if entries:
         for idx, entry in enumerate(entries, start=1):

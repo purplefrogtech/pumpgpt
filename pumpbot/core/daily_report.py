@@ -14,8 +14,6 @@ import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
 from loguru import logger  # noqa: E402
 
-from pumpbot.core.detector import TREND_DOWN, TREND_UP
-
 DB_PATH = Path("signals.db")
 CSV_PATH = os.getenv("SIGNALS_DAILY_CSV", "signals_daily.csv")
 
@@ -118,8 +116,11 @@ def generate_daily_report(csv_path: str = CSV_PATH) -> Tuple[str, Optional[str]]
     parts = ["🧾 Gün Sonu Özeti"]
 
     if df_signals_today is not None and not df_signals_today.empty:
-        up_cnt = int((df_signals_today["trend"] == TREND_UP).sum())
-        dn_cnt = int((df_signals_today["trend"] == TREND_DOWN).sum())
+        if "trend" in df_signals_today.columns:
+            up_cnt = int(df_signals_today["trend"].astype(str).str.contains("UP", case=False, na=False).sum())
+            dn_cnt = int(df_signals_today["trend"].astype(str).str.contains("DOWN", case=False, na=False).sum())
+        else:
+            up_cnt = dn_cnt = 0
         parts += [
             f"• Toplam sinyal: {len(df_signals_today)}",
             f"• Yükseliş/Düşüş: {up_cnt}/{dn_cnt}",

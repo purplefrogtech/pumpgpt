@@ -2,6 +2,7 @@ import asyncio
 import os
 import signal
 from datetime import datetime, timedelta
+from typing import List
 
 from binance import AsyncClient
 from dotenv import load_dotenv
@@ -22,8 +23,15 @@ from pumpbot.bot.handlers import (
 from pumpbot.core.daily_report import generate_daily_report
 from pumpbot.core.database import init_db
 from pumpbot.core.detector import scan_symbols
+from pumpbot.core.quality_filter import get_recent_success_rate, should_emit_signal
 from pumpbot.core.sim import SimEngine
+from pumpbot.core.throttle import allow_signal
 from pumpbot.telebot.notifier import format_daily_report_caption, send_vip_signal
+
+ALLOWED_INTERVALS = {"5m", "15m", "30m", "1h"}
+MAJORS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"]
+MID_CAPS = ["AVAXUSDT", "MATICUSDT", "LINKUSDT", "DOTUSDT", "ATOMUSDT"]
+HIGH_BETA = ["APTUSDT", "OPUSDT", "NEARUSDT", "FTMUSDT", "ARBUSDT"]
 
 
 # -------------------- Logging --------------------
@@ -37,7 +45,7 @@ def setup_logging(debug: bool):
     )
 
 
-def _parse_chat_ids(chat_ids_csv: str):
+def _parse_chat_ids(chat_ids_csv: str) -> List[int]:
     ids = []
     for raw in chat_ids_csv.split(","):
         token = raw.strip()
@@ -48,6 +56,26 @@ def _parse_chat_ids(chat_ids_csv: str):
         except ValueError:
             logger.warning(f"Geçersiz chat_id atlandı: {token}")
     return ids
+
+
+def _build_symbols(env_symbols_csv: str) -> List[str]:
+    env_symbols = [s.strip().upper() for s in env_symbols_csv.split(",") if s.strip()]
+    combined: List[str] = []
+    for sym in env_symbols + MAJORS + MID_CAPS + HIGH_BETA:
+        if sym and sym not in combined:
+            combined.append(sym)
+    return combined
+
+
+def _normalize_timeframe(tf: str) -> str:
+    tf = (tf or "15m").lower()
+    if tf == "1m":
+        logger.warning("1m timeframe is not allowed. Using 15m.")
+        return "15m"
+    if tf not in ALLOWED_INTERVALS:
+        logger.warning(f"Timeframe {tf} not allowed. Using 15m.")
+        return "15m"
+    return tf
 
 
 # -------------------- Gün sonu raporu --------------------
@@ -95,9 +123,11 @@ async def main():
     chat_ids = os.getenv("TELEGRAM_CHAT_IDS", "").strip()
     api_key = os.getenv("BINANCE_API_KEY", "").strip()
     api_secret = os.getenv("BINANCE_API_SECRET", "").strip()
-    symbols = os.getenv(
-        "SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT,DOGEUSDT,BNBUSDT"
-    ).replace(" ", "").split(",")
+    env_symbols_csv = os.getenv("SYMBOLS", "")
+    timeframe = _normalize_timeframe(os.getenv("TIMEFRAME", "15m"))
+    scan_interval = max(int(os.getenv("SCAN_INTERVAL_SECONDS", "60")), 30)
+
+    symbols = _build_symbols(env_symbols_csv)
 
     # Telegram app
     app = ApplicationBuilder().token(bot_token).build()
@@ -117,18 +147,37 @@ async def main():
     logger.info("📡 Binance API bağlantısı başarılı.")
     sim = SimEngine(notifier=lambda text: notify_all(app, chat_ids, text))
 
-    async def on_alert(payload: dict):
-        await send_vip_signal(app, chat_ids, payload)
+    async def on_alert(payload: dict, market_data: dict):
+        # historical success rate and gating
+        success_rate = get_recent_success_rate()
+        payload["success_rate"] = success_rate
+        market_data["success_rate"] = success_rate
+
+        if not should_emit_signal(payload, market_data):
+            return False
+        if not allow_signal(payload["symbol"], minutes=30):
+            return False
+
+        try:
+            await send_vip_signal(app, chat_ids, payload)
+        except Exception as exc:
+            logger.error(f"VIP sinyal gönderimi başarısız: {exc}")
+            return False
+
+        try:
+            await sim.on_signal_open(payload)
+        except Exception as exc:
+            logger.error(f"SimEngine open hatası: {exc}")
+        return True
 
     # Paralel görevler
     task_scan = asyncio.create_task(
         scan_symbols(
             client,
             symbols,
-            "1m",
-            int(os.getenv("SCAN_INTERVAL_SECONDS", "30")),
+            timeframe,
+            scan_interval,
             on_alert,
-            sim,
         )
     )
     task_report = asyncio.create_task(schedule_daily_report(app, chat_ids))
