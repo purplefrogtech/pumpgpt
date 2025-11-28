@@ -1,27 +1,134 @@
-import logging
+from __future__ import annotations
+
+import html
+from datetime import datetime
+from pathlib import Path
+from typing import Iterable, List, Sequence
+
+from loguru import logger
 from telegram.constants import ParseMode
 
-logger = logging.getLogger("PumpGPT.Notifier")
 
-async def send_alert(app, chat_ids, signal):
-    """
-    Telegram’a sinyal mesajı gönderir.
-    """
-    text = (
-        f"🚨 *Yeni Pump Sinyali Tespit Edildi!*\n\n"
-        f"💰 Coin: `{signal.get('symbol', 'Bilinmiyor')}`\n"
-        f"📈 Fiyat: `{signal.get('price', '---')}`\n"
-        f"📊 Hacim Artışı: `{signal.get('volume_change', '---')}%`\n"
-        f"🕒 Zaman: `{signal.get('timestamp', '')}`"
-    )
-
-    for chat_id in chat_ids:
+def _parse_chat_ids(chat_ids_csv: str) -> List[int]:
+    chat_ids: List[int] = []
+    for raw in chat_ids_csv.split(","):
+        token = raw.strip()
+        if not token:
+            continue
         try:
-            await app.bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode=ParseMode.MARKDOWN
-            )
-            logger.info(f"📤 Sinyal gönderildi → Chat {chat_id}")
-        except Exception as e:
-            logger.error(f"⚠️ Telegram gönderim hatası ({chat_id}): {e}")
+            chat_ids.append(int(token))
+        except ValueError:
+            logger.warning(f"Geçersiz chat_id atlandı: {token}")
+    return chat_ids
+
+
+def _format_price(value) -> str:
+    if value is None:
+        return "—"
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    # human friendly with thousand separator; adaptive decimals
+    if abs(num) >= 100:
+        return f"{num:,.0f}"
+    if abs(num) >= 1:
+        return f"{num:,.2f}"
+    return f"{num:.6f}".rstrip("0").rstrip(".")
+
+
+def _format_dt(dt_val) -> str:
+    if isinstance(dt_val, datetime):
+        return dt_val.strftime("%Y-%m-%d %H:%M (UTC)")
+    if isinstance(dt_val, str):
+        try:
+            parsed = datetime.fromisoformat(dt_val.replace("Z", "+00:00"))
+            return parsed.strftime("%Y-%m-%d %H:%M (UTC)")
+        except ValueError:
+            return dt_val
+    return ""
+
+
+def format_signal_message(payload: dict) -> str:
+    symbol = payload.get("symbol", "—")
+    side_raw = str(payload.get("side", "")).upper()
+    side = "🟢 <b>LONG</b>" if side_raw == "LONG" else "🔴 <b>SHORT</b>"
+    leverage = payload.get("leverage", "—")
+    timeframe = payload.get("timeframe", "—")
+    strategy = payload.get("strategy", "—")
+
+    entries: Sequence = payload.get("entry") or []
+    if not isinstance(entries, Iterable) or isinstance(entries, (str, bytes)):
+        entries = [entries]
+    entries = [e for e in entries if e is not None]
+
+    tp_levels: Sequence = payload.get("tp_levels") or []
+    if not isinstance(tp_levels, Iterable) or isinstance(tp_levels, (str, bytes)):
+        tp_levels = [tp_levels]
+    tp_levels = [lvl for lvl in tp_levels if lvl is not None]
+
+    stop_loss = payload.get("sl", "—")
+    created_at = _format_dt(payload.get("created_at"))
+
+    lines = [
+        "💎 <b>PUMP•GPT VIP SIGNAL</b>",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        f"📌 <b>{html.escape(str(symbol))}</b> · {side} · {leverage}x",
+        f"⏱ Timeframe: {html.escape(str(timeframe))} · Strateji: {html.escape(str(strategy))}",
+        "",
+        "🎯 <b>Entry Bölgesi</b>",
+    ]
+
+    if entries:
+        for idx, entry in enumerate(entries, start=1):
+            lines.append(f"{idx}) {_format_price(entry)}")
+    else:
+        lines.append("—")
+
+    if tp_levels:
+        lines.append("")
+        for idx, tp in enumerate(tp_levels, start=1):
+            medal = "🥇" if idx == 1 else "🥈" if idx == 2 else "🥉" if idx == 3 else "🎯"
+            lines.append(f"{medal} <b>TP {idx}</b>: {_format_price(tp)}")
+
+    lines += [
+        f"🛑 <b>Stop Loss</b>: {_format_price(stop_loss)}",
+        "",
+        f"📊 Sinyal Zamanı: {created_at}",
+        "",
+        "⚠️ <i>Kripto piyasaları yüksek risk içerir. İşlemler yatırım tavsiyesi değildir.</i>",
+    ]
+
+    return "\n".join(lines)
+
+
+def format_daily_report_caption(summary: str) -> str:
+    safe_summary = html.escape(summary.strip())
+    return f"📆 <b>PUMP•GPT Gün Sonu VIP Raporu</b>\n{safe_summary}"
+
+
+async def send_vip_signal(app, chat_ids_csv: str, payload: dict) -> None:
+    chat_ids = _parse_chat_ids(chat_ids_csv)
+    caption = format_signal_message(payload)
+    chart_path = payload.get("chart_path") or payload.get("chart")
+    has_chart = bool(chart_path) and Path(str(chart_path)).exists()
+
+    for cid in chat_ids:
+        try:
+            if has_chart:
+                with open(chart_path, "rb") as photo:
+                    await app.bot.send_photo(
+                        chat_id=cid,
+                        photo=photo,
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                    )
+            else:
+                await app.bot.send_message(
+                    chat_id=cid,
+                    text=caption,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+        except Exception as exc:
+            logger.error(f"VIP signal send failed for chat {cid}: {exc}")
