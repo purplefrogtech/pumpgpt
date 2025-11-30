@@ -17,6 +17,8 @@ from pumpbot.bot.handlers import (
     cmd_start,
     cmd_status,
     cmd_symbols,
+    cmd_testsignal,
+    cmd_health,
     cmd_trades,
     notify_all,
 )
@@ -28,21 +30,25 @@ from pumpbot.core.sim import SimEngine
 from pumpbot.core.throttle import allow_signal
 from pumpbot.telebot.notifier import format_daily_report_caption, send_vip_signal
 
-ALLOWED_INTERVALS = {"5m", "15m", "30m", "1h"}
+
+ALLOWED_INTERVALS = {"15m", "30m", "1h"}
 MAJORS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"]
 MID_CAPS = ["AVAXUSDT", "MATICUSDT", "LINKUSDT", "DOTUSDT", "ATOMUSDT"]
 HIGH_BETA = ["APTUSDT", "OPUSDT", "NEARUSDT", "FTMUSDT", "ARBUSDT"]
 
 
 # -------------------- Logging --------------------
-def setup_logging(debug: bool):
+def setup_logging():
     logger.remove()
-    level = "DEBUG" if debug else "INFO"
+    env_level = os.getenv("DEBUG_LEVEL", "").strip().upper()
+    debug_mode = os.getenv("DEBUG_MODE", "0") == "1"
+    level = env_level if env_level else ("DEBUG" if debug_mode else "INFO")
     logger.add(
         lambda m: print(m, end=""),
         level=level,
         format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{message}</level>",
     )
+    logger.info(f"Logging initialized at level {level}")
 
 
 def _parse_chat_ids(chat_ids_csv: str) -> List[int]:
@@ -69,9 +75,6 @@ def _build_symbols(env_symbols_csv: str) -> List[str]:
 
 def _normalize_timeframe(tf: str) -> str:
     tf = (tf or "15m").lower()
-    if tf == "1m":
-        logger.warning("1m timeframe is not allowed. Using 15m.")
-        return "15m"
     if tf not in ALLOWED_INTERVALS:
         logger.warning(f"Timeframe {tf} not allowed. Using 15m.")
         return "15m"
@@ -88,34 +91,36 @@ async def schedule_daily_report(app, chat_ids_csv: str, hour: int = 23, minute: 
             target = target + timedelta(days=1)
         await asyncio.sleep((target - now).total_seconds())
 
-        summary_text, chart = generate_daily_report()
-        caption = format_daily_report_caption(summary_text) if summary_text else None
-        for cid in _parse_chat_ids(chat_ids_csv):
-            try:
-                if chart and caption:
-                    with open(chart, "rb") as f:
-                        await app.bot.send_photo(
+        try:
+            summary_text, chart = generate_daily_report()
+            caption = format_daily_report_caption(summary_text) if summary_text else None
+            for cid in _parse_chat_ids(chat_ids_csv):
+                try:
+                    if chart and caption:
+                        with open(chart, "rb") as f:
+                            await app.bot.send_photo(
+                                chat_id=cid,
+                                photo=f,
+                                caption=caption,
+                                parse_mode=ParseMode.HTML,
+                            )
+                    elif caption:
+                        await app.bot.send_message(
                             chat_id=cid,
-                            photo=f,
-                            caption=caption,
+                            text=caption,
                             parse_mode=ParseMode.HTML,
+                            disable_web_page_preview=True,
                         )
-                elif caption:
-                    await app.bot.send_message(
-                        chat_id=cid,
-                        text=caption,
-                        parse_mode=ParseMode.HTML,
-                        disable_web_page_preview=True,
-                    )
-            except Exception as exc:
-                logger.error(f"Gün sonu raporu gönderilemedi ({cid}): {exc}")
+                except Exception as exc:
+                    logger.error(f"Gün sonu raporu gönderilemedi ({cid}): {exc}")
+        except Exception as exc:
+            logger.error(f"Gün sonu raporu oluşturulamadı: {exc}")
 
 
 # -------------------- Main --------------------
 async def main():
     load_dotenv()
-    debug_mode = os.getenv("DEBUG_MODE", "0") == "1"
-    setup_logging(debug_mode)
+    setup_logging()
 
     init_db()
 
@@ -126,8 +131,13 @@ async def main():
     env_symbols_csv = os.getenv("SYMBOLS", "")
     timeframe = _normalize_timeframe(os.getenv("TIMEFRAME", "15m"))
     scan_interval = max(int(os.getenv("SCAN_INTERVAL_SECONDS", "60")), 30)
+    throttle_minutes = int(os.getenv("THROTTLE_MINUTES", "30"))
 
     symbols = _build_symbols(env_symbols_csv)
+
+    logger.info(
+        f"Config | timeframe={timeframe} scan_interval={scan_interval}s throttle={throttle_minutes}m symbols={len(symbols)}"
+    )
 
     # Telegram app
     app = ApplicationBuilder().token(bot_token).build()
@@ -141,34 +151,56 @@ async def main():
     app.add_handler(CommandHandler("trades", cmd_trades))
     app.add_handler(CommandHandler("config", cmd_config))
     app.add_handler(CommandHandler("report", cmd_report))
+    app.add_handler(CommandHandler("testsignal", cmd_testsignal))
+    app.add_handler(CommandHandler("health", cmd_health))
 
     # Binance client + Sim
     client = await AsyncClient.create(api_key=api_key, api_secret=api_secret)
     logger.info("📡 Binance API bağlantısı başarılı.")
+    app.bot_data["binance_client"] = client
+
     sim = SimEngine(notifier=lambda text: notify_all(app, chat_ids, text))
 
     async def on_alert(payload: dict, market_data: dict):
-        # historical success rate and gating
-        success_rate = get_recent_success_rate()
-        payload["success_rate"] = success_rate
-        market_data["success_rate"] = success_rate
-
-        if not should_emit_signal(payload, market_data):
-            return False
-        if not allow_signal(payload["symbol"], minutes=30):
-            return False
+        """
+        Central signal gating logic.
+        Returns True if signal was successfully sent, False if blocked.
+        """
+        symbol = payload.get("symbol", "UNKNOWN")
+        side = payload.get("side", "?")
 
         try:
-            await send_vip_signal(app, chat_ids, payload)
-        except Exception as exc:
-            logger.error(f"VIP sinyal gönderimi başarısız: {exc}")
-            return False
+            success_rate = get_recent_success_rate()
+            payload["success_rate"] = success_rate
+            market_data["success_rate"] = success_rate
 
-        try:
-            await sim.on_signal_open(payload)
+            if not should_emit_signal(payload, market_data):
+                logger.warning(f"[{symbol}] Rejected by quality_filter")
+                return False
+
+            if not allow_signal(symbol, minutes=throttle_minutes):
+                logger.warning(f"[{symbol}] Rejected by throttle")
+                return False
+
+            try:
+                await send_vip_signal(app, chat_ids, payload)
+                logger.success(f"[{symbol}] VIP signal sent ({side})")
+            except Exception as exc:
+                logger.error(f"[{symbol}] VIP sinyal gönderimi başarısız: {exc}")
+                return False
+
+            try:
+                await sim.on_signal_open(payload)
+                logger.success(f"[{symbol}] Trade opened in simulator")
+            except Exception as exc:
+                logger.error(f"[{symbol}] SimEngine open hatası: {exc}")
+                # Don't fail the entire signal for sim error
+
+            return True
+
         except Exception as exc:
-            logger.error(f"SimEngine open hatası: {exc}")
-        return True
+            logger.error(f"[{symbol}] on_alert unexpected error: {exc}", exc_info=True)
+            return False
 
     # Paralel görevler
     task_scan = asyncio.create_task(
@@ -181,6 +213,11 @@ async def main():
         )
     )
     task_report = asyncio.create_task(schedule_daily_report(app, chat_ids))
+
+    task_scan.add_done_callback(lambda t: logger.error(f"scan_symbols stopped: {t.exception()}") if t.exception() else None)
+    task_report.add_done_callback(
+        lambda t: logger.error(f"schedule_daily_report stopped: {t.exception()}") if t.exception() else None
+    )
 
     # Telegram polling
     await app.initialize()
