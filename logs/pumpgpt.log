@@ -7,7 +7,7 @@
 2025-11-12 07:07:06.928 | DEBUG    | pumpbot.core.detector:scan_symbols:89 - ➡️ ETHUSDT skor=-352.62 (eşik 30.0) — alert yok.
 2025-11-12 07:07:06.928 | DEBUG    | pumpbot.core.detector:scan_symbols:91 - ⏳ ETHUSDT taraması bitti.
 2025-11-12 07:07:07.234 | DEBUG    | pumpbot.core.detector:scan_symbols:89 - ➡️ SOLUSDT skor=-45.92 (eşik 30.0) — alert yok.
-2025-11-12 07:07:07.243 | DEBUG    | pumpbot.core.detector:scan_symbols:91 - ⏳ SOLUSDT taraması bitti.
+2025-11-12 07:07:07.243 | DEBQUG    | pumpbot.core.detector:scan_symbols:91 - ⏳ SOLUSDT taraması bitti.
 2025-11-12 07:07:07.514 | DEBUG    | pumpbot.core.detector:scan_symbols:89 - ➡️ DOGEUSDT skor=-16.72 (eşik 30.0) — alert yok.
 2025-11-12 07:07:07.514 | DEBUG    | pumpbot.core.detector:scan_symbols:91 - ⏳ DOGEUSDT taraması bitti.
 2025-11-12 07:07:07.821 | DEBUG    | pumpbot.core.detector:scan_symbols:89 - ➡️ BNBUSDT skor=-49.22 (eşik 30.0) — alert yok.

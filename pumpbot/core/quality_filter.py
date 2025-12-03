@@ -11,14 +11,15 @@ from pumpbot.core.debugger import debug_filter_reject
 
 DB_PATH = Path("signals.db")
 
-# Tunable thresholds (relaxed to avoid over-filtering)
+# Tunable thresholds (relaxed further for balance)
 MIN_RISK_REWARD = float(os.getenv("MIN_RISK_REWARD", "1.2"))
 MIN_RSI = float(os.getenv("MIN_RSI", "30"))
 MAX_RSI = float(os.getenv("MAX_RSI", "70"))
-MIN_ATR_PCT = float(os.getenv("MIN_ATR_PCT", "0.00015"))  # 0.015%
-MIN_VOLUME_RATIO = float(os.getenv("MIN_VOLUME_RATIO", "1.05"))  # light spike
+MIN_ATR_PCT = float(os.getenv("MIN_ATR_PCT", "0.000075"))  # 50% less than before (0.00015 → 0.000075)
+MIN_VOLUME_RATIO = float(os.getenv("MIN_VOLUME_RATIO", "1.2"))  # Relaxed from 1.05 to 1.2 (20% spike)
 MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.01"))  # 1%
 MIN_SUCCESS_RATE = float(os.getenv("MIN_SUCCESS_RATE", "25"))
+VOLUME_SPIKE_THRESHOLD = float(os.getenv("VOLUME_SPIKE_THRESHOLD", "1.2"))  # Relaxed from 1.5 → 1.2
 
 
 def get_recent_success_rate(limit: int = 30) -> float:
@@ -48,7 +49,9 @@ def should_emit_signal(payload: Dict, market_data: Dict) -> bool:
     """
     Centralized quality gate. Returns False to block any outgoing signal.
     Uses relaxed but safer thresholds to avoid full shutdown of signals.
+    Logs reason for every rejection.
     """
+    symbol = payload.get("symbol", "UNKNOWN")
     price = float(market_data.get("price") or payload.get("price") or 0.0)
     rsi_raw = payload.get("rsi") or market_data.get("rsi")
     rsi_val = float(rsi_raw) if rsi_raw is not None else None
@@ -65,45 +68,44 @@ def should_emit_signal(payload: Dict, market_data: Dict) -> bool:
         success_rate = get_recent_success_rate()
         market_data["success_rate"] = success_rate
 
+    # Mandatory checks (block if fail)
     if price <= 0:
-        debug_filter_reject("price", "Price missing or zero")
+        logger.warning(f"[FILTER] {symbol} rejected: Price missing or zero")
         return False
 
     if not trend_ok:
-        debug_filter_reject("trend", "Trend misalignment")
+        logger.warning(f"[FILTER] {symbol} rejected: Trend misalignment (close>ema20>ema50 required)")
         return False
 
     if rsi_val is not None and (rsi_val < MIN_RSI or rsi_val > MAX_RSI):
-        debug_filter_reject("rsi", f"RSI {rsi_val:.1f} outside {MIN_RSI}-{MAX_RSI}")
+        logger.warning(f"[FILTER] {symbol} rejected: RSI {rsi_val:.1f} outside {MIN_RSI}-{MAX_RSI}")
         return False
 
     if risk_reward < MIN_RISK_REWARD:
-        debug_filter_reject("risk_reward", f"R:R {risk_reward:.2f} below {MIN_RISK_REWARD}")
+        logger.warning(f"[FILTER] {symbol} rejected: R:R {risk_reward:.2f} below {MIN_RISK_REWARD}")
         return False
 
     if atr_pct < MIN_ATR_PCT:
-        debug_filter_reject("atr", f"ATR {atr_pct:.4%} too low")
+        logger.warning(f"[FILTER] {symbol} rejected: ATR {atr_pct:.6f} too low (min {MIN_ATR_PCT:.6f})")
         return False
 
     if liquidity_blocked:
-        debug_filter_reject("liquidity", "Recent liquidity cluster blocks entry")
+        logger.warning(f"[FILTER] {symbol} rejected: Recent liquidity cluster blocks entry")
         return False
 
     if spread_pct > MAX_SPREAD_PCT:
-        debug_filter_reject("spread", f"Spread {spread_pct:.4f} above {MAX_SPREAD_PCT}")
+        logger.warning(f"[FILTER] {symbol} rejected: Spread {spread_pct:.4f} above {MAX_SPREAD_PCT}")
         return False
 
-    # Soft warnings (do not block)
-    if not volume_spike:
-        logger.debug(f"[WARN] Volume spike weak (change {volume_change_pct:.2f}%)")
-    elif volume_change_pct < MIN_VOLUME_RATIO * 100 - 100:
-        logger.debug(f"[WARN] Volume change {volume_change_pct:.2f}% below light spike target")
+    # Soft warnings (do not block) - just log
+    if not volume_spike or volume_change_pct < (VOLUME_SPIKE_THRESHOLD - 1) * 100:
+        logger.debug(f"[FILTER] {symbol} weak volume spike: {volume_change_pct:.2f}% (soft warning)")
 
     if success_rate < MIN_SUCCESS_RATE:
-        logger.debug(f"[WARN] Success rate {success_rate:.1f}% below {MIN_SUCCESS_RATE}% (informational)")
+        logger.debug(f"[FILTER] {symbol} low success rate: {success_rate:.1f}% (soft warning)")
 
-    logger.debug(
-        f"[QUALITY] PASS | R:R={risk_reward:.2f} RSI={rsi_val:.1f} ATR={atr_pct:.3%} "
-        f"Spread={spread_pct:.4f} VolChange={volume_change_pct:.2f}% SR={success_rate:.1f}%"
+    logger.success(
+        f"[FILTER] {symbol} PASS | R:R={risk_reward:.2f} RSI={rsi_val:.1f if rsi_val else 'N/A'} "
+        f"ATR={atr_pct:.6f} VolSpike={volume_change_pct:.2f}% SR={success_rate:.1f}%"
     )
     return True

@@ -1,0 +1,10 @@
+{
+  "999": {
+    "horizon": "long",
+    "risk": "medium"
+  },
+  "5124738136": {
+    "horizon": "short",
+    "risk": "high"
+  }
+}

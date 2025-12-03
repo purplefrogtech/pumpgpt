@@ -9,7 +9,9 @@ from typing import List, Literal, Optional, Sequence
 from binance import AsyncClient
 from loguru import logger
 
+from pumpbot.core.chart_generator import generate_chart
 from pumpbot.core.state import hours_since_last_signal, record_signal
+from pumpbot.core.signal_engine import SignalComponents, compute_score, passes_quality_gate
 
 Side = Literal["LONG", "SHORT"]
 
@@ -34,6 +36,7 @@ class SignalPayload:
     swing_high: Optional[float] = None
     swing_low: Optional[float] = None
     trend_label: Optional[str] = None
+    score: Optional[float] = None  # Dynamic score from signal_engine
 
 
 # --- math helpers (lightweight, no heavy deps) ---
@@ -170,6 +173,7 @@ async def analyze_symbol_midterm(
     htf_timeframe: str = "1h",
     leverage: int = 10,
     strategy: str = "PUMP-GPT Midterm",
+    preset=None,
 ) -> Optional[SignalPayload]:
     base_tf = base_timeframe
     htf_tf = htf_timeframe
@@ -192,12 +196,28 @@ async def analyze_symbol_midterm(
     ema100_htf = ema(htf_close, 100)
     if len(ema20_htf) < 1 or len(ema100_htf) < 1:
         return None
+    
+    # Determine trend from HTF EMAs - more flexible detection
     trend = None
-    if htf_close[-1] > ema20_htf[-1] > ema50_htf[-1] > ema100_htf[-1]:
+    htf_close_now = htf_close[-1]
+    ema20_htf_now = ema20_htf[-1]
+    ema50_htf_now = ema50_htf[-1]
+    ema100_htf_now = ema100_htf[-1]
+    
+    # Strong trend: all EMAs in order
+    if htf_close_now > ema20_htf_now > ema50_htf_now > ema100_htf_now:
         trend = "UP"
-    elif htf_close[-1] < ema20_htf[-1] < ema50_htf[-1] < ema100_htf[-1]:
+    elif htf_close_now < ema20_htf_now < ema50_htf_now < ema100_htf_now:
+        trend = "DOWN"
+    # Flexible trend: price above 50 EMA
+    elif htf_close_now > ema50_htf_now > ema100_htf_now:
+        trend = "UP"
+    # Flexible trend: price below 50 EMA
+    elif htf_close_now < ema50_htf_now < ema100_htf_now:
         trend = "DOWN"
     else:
+        # No clear trend (consolidation) - allow analysis but mark weak trend
+        logger.debug(f"{symbol} No clear HTF trend, skipping")
         return None
 
     # Base indicators
@@ -253,6 +273,57 @@ async def analyze_symbol_midterm(
     if side is None or sl is None:
         return None
 
+    # Compute SignalComponents for dynamic scoring (if preset provided)
+    trend_strength = 0.0
+    if trend == "UP":
+        # How well price is aligned with uptrend
+        trend_strength = min(1.0, (close_now - ema50_now) / (atr_now + 0.0001))
+    elif trend == "DOWN":
+        # How well price is aligned with downtrend
+        trend_strength = min(1.0, (ema50_now - close_now) / (atr_now + 0.0001))
+    trend_strength = max(0.0, min(1.0, trend_strength))
+    
+    # Momentum from RSI (0-1 scale)
+    momentum = 0.5  # neutral default
+    if base_rsi is not None:
+        # Convert RSI (0-100) to (0-1)
+        momentum = base_rsi / 100.0
+    
+    # Volume spike already computed as vol_ratio
+    volume_spike = vol_ratio
+    
+    # Volatility from ATR normalized (0-1)
+    volatility = min(1.0, atr_now / (atr_mean + 0.0001))
+    
+    # Noise level (inverse of trend clarity)
+    # Lower noise = clearer trend
+    noise_level = 1.0 - abs(close_now - ema20_now) / (atr_now + 0.0001)
+    noise_level = max(0.0, min(1.0, noise_level))
+    
+    # Create components for scoring
+    components = SignalComponents(
+        trend_strength=trend_strength,
+        momentum=momentum,
+        volume_spike=volume_spike,
+        volatility=volatility,
+        noise_level=noise_level,
+    )
+    
+    # Use preset if provided, otherwise use default quality checks
+    if preset:
+        # Check quality gates first
+        passes, reason = passes_quality_gate(components, preset)
+        if not passes:
+            logger.debug(f"{symbol} quality gate failed: {reason}")
+            return None
+        
+        # Compute score
+        score = compute_score(components, preset)
+        logger.debug(f"{symbol} signal score: {score:.1f} (trend={trend_strength:.2f}, vol={volume_spike:.2f})")
+    else:
+        # Backward compatibility: no preset, use default checks
+        score = None
+
     entry_mid = close_now
     entry_range = [entry_mid - 0.25 * atr_now, entry_mid + 0.25 * atr_now]
 
@@ -268,6 +339,32 @@ async def analyze_symbol_midterm(
         tp3 = entry_mid - 3.5 * risk
 
     risk_reward = abs((tp1 - entry_mid) / risk) if risk != 0 else None
+    
+    # Generate chart BEFORE creating payload
+    chart_path = None
+    try:
+        chart_path = generate_chart(
+            symbol=symbol,
+            closes=base_close,
+            highs=base_high,
+            lows=base_low,
+            opens=[row[1] for row in base_raw],
+            volumes=base_vol,
+            ema20=ema20,
+            ema50=ema50,
+            entry_price=entry_mid,
+            tp1=tp1,
+            tp2=tp2,
+            sl=sl,
+            signal_side=side,
+        )
+        if chart_path:
+            logger.success(f"{symbol} chart generated: {chart_path}")
+        else:
+            logger.warning(f"{symbol} chart generation returned None")
+    except Exception as exc:
+        logger.error(f"{symbol} chart generation error: {exc}", exc_info=True)
+    
     payload = SignalPayload(
         symbol=symbol,
         side=side,
@@ -278,7 +375,7 @@ async def analyze_symbol_midterm(
         leverage=leverage,
         strategy=strategy,
         created_at=datetime.now(timezone.utc),
-        chart_path=None,
+        chart_path=chart_path,
         rsi=base_rsi,
         atr_pct=(atr_now / close_now) if close_now else None,
         volume_spike_ratio=vol_ratio,
@@ -286,6 +383,7 @@ async def analyze_symbol_midterm(
         swing_high=swing_high,
         swing_low=swing_low,
         trend_label=_format_trend_label(trend, htf_tf),
+        score=score,  # Add dynamic score
     )
 
     # adaptive reset

@@ -20,6 +20,9 @@ from pumpbot.bot.handlers import (
     cmd_testsignal,
     cmd_health,
     cmd_trades,
+    cmd_sethorizon,
+    cmd_setrisk,
+    cmd_profile,
     notify_all,
 )
 from pumpbot.core.daily_report import generate_daily_report
@@ -32,16 +35,40 @@ from pumpbot.telebot.notifier import format_daily_report_caption, send_vip_signa
 
 
 ALLOWED_INTERVALS = {"15m", "30m", "1h"}
-MAJORS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT"]
-MID_CAPS = ["AVAXUSDT", "MATICUSDT", "LINKUSDT", "DOTUSDT", "ATOMUSDT"]
-HIGH_BETA = ["APTUSDT", "OPUSDT", "NEARUSDT", "FTMUSDT", "ARBUSDT"]
+
+# Preferred symbols (will fetch valid ones from Binance)
+PREFERRED_SYMBOLS = [
+    # Majors
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT",
+    # Mid-caps
+    "AVAXUSDT", "MATICUSDT", "LINKUSDT", "DOTUSDT", "ATOMUSDT",
+    # High-beta
+    "ARBUSDT", "OPUSDT", "NEARUSDT", "FTMUSDT", "APRUSDT",
+    # Alt Layer 1s
+    "SUIUSDT", "MOVEUSDT", "ZKUSDT", "INJUSDT", "ICPUSDT",
+    # DeFi
+    "UNIUSDT", "AAVEUSDT", "CRVUSDT", "DYDXUSDT", "GMXUSDT",
+    # Gaming/NFT
+    "JUPUSDT", "MAGICUSDT", "WIFUSDT", "BONKUSDT", "SANDUSDT", "MANAUSDT", "ENJUSDT",
+    # Emerging/Others
+    "THETAUSDT", "FILUSDT", "GRTUSDT", "COTIUSDT", "DOGEUSDT", "SHIBUSDT", "PEPEUSDT", "FLOKIUSDT",
+    # Layer 2s
+    "LRCUSDT", "IMXUSDT", "SKLUSDT", "POWRUSDT",
+    # Staking
+    "LDOUSDT", "CVXUSDT", "QNTUSDT", "RNDRUSDT", "ONTUSDT",
+    # More alts
+    "HBARUSDT", "CHZUSDT", "XECUSDT", "FTUSDT", "ETHFIUSDT",
+]
+
+# Will be populated from Binance
+VALID_SYMBOLS = []
 
 
 # -------------------- Logging --------------------
 def setup_logging():
     logger.remove()
     env_level = os.getenv("DEBUG_LEVEL", "").strip().upper()
-    debug_mode = os.getenv("DEBUG_MODE", "0") == "1"
+    debug_mode = os.getenv("DEBUG_MODE", "1") == "1"  # DEFAULT TRUE NOW
     level = env_level if env_level else ("DEBUG" if debug_mode else "INFO")
     logger.add(
         lambda m: print(m, end=""),
@@ -65,12 +92,32 @@ def _parse_chat_ids(chat_ids_csv: str) -> List[int]:
 
 
 def _build_symbols(env_symbols_csv: str) -> List[str]:
+    """Build symbol list from env, VALID_SYMBOLS, and preferred list."""
     env_symbols = [s.strip().upper() for s in env_symbols_csv.split(",") if s.strip()]
     combined: List[str] = []
-    for sym in env_symbols + MAJORS + MID_CAPS + HIGH_BETA:
+    # Use VALID_SYMBOLS if available (fetched from Binance), otherwise use preferred list
+    source = VALID_SYMBOLS if VALID_SYMBOLS else PREFERRED_SYMBOLS
+    for sym in env_symbols + source:
         if sym and sym not in combined:
             combined.append(sym)
     return combined
+
+
+async def _fetch_valid_symbols_from_binance(client: AsyncClient) -> List[str]:
+    """Fetch trading pairs from Binance and filter for USDT spot market."""
+    try:
+        exchange_info = await client.get_exchange_info()
+        valid_symbols = []
+        for symbol_info in exchange_info["symbols"]:
+            symbol = symbol_info["symbol"]
+            # Only USDT spot pairs, trading enabled
+            if symbol.endswith("USDT") and symbol_info["status"] == "TRADING":
+                valid_symbols.append(symbol)
+        logger.info(f"Fetched {len(valid_symbols)} valid USDT symbols from Binance")
+        return valid_symbols
+    except Exception as exc:
+        logger.error(f"Failed to fetch symbols from Binance: {exc}")
+        return PREFERRED_SYMBOLS  # Fallback to hardcoded list
 
 
 def _normalize_timeframe(tf: str) -> str:
@@ -132,7 +179,21 @@ async def main():
     timeframe = _normalize_timeframe(os.getenv("TIMEFRAME", "15m"))
     scan_interval = max(int(os.getenv("SCAN_INTERVAL_SECONDS", "60")), 30)
     throttle_minutes = int(os.getenv("THROTTLE_MINUTES", "30"))
+    webhook_url = os.getenv("WEBHOOK_URL", "").strip()
+    webhook_port = int(os.getenv("WEBHOOK_PORT", "8443"))
 
+    # Binance client to fetch valid symbols
+    client = AsyncClient(api_key, api_secret)
+    try:
+        valid_symbols = await _fetch_valid_symbols_from_binance(client)
+        VALID_SYMBOLS.clear()
+        VALID_SYMBOLS.extend(valid_symbols)
+    except Exception as exc:
+        logger.error(f"Could not fetch symbols from Binance: {exc}")
+    
+    # Close and recreate with create() for proper async setup
+    await client.close_connection()
+    
     symbols = _build_symbols(env_symbols_csv)
 
     logger.info(
@@ -153,6 +214,10 @@ async def main():
     app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("testsignal", cmd_testsignal))
     app.add_handler(CommandHandler("health", cmd_health))
+    # Yeni komutlar: Horizon + Risk settings
+    app.add_handler(CommandHandler("sethorizon", cmd_sethorizon))
+    app.add_handler(CommandHandler("setrisk", cmd_setrisk))
+    app.add_handler(CommandHandler("profile", cmd_profile))
 
     # Binance client + Sim
     client = await AsyncClient.create(api_key=api_key, api_secret=api_secret)
@@ -210,6 +275,7 @@ async def main():
             timeframe,
             scan_interval,
             on_alert,
+            user_id=0,  # 0 = default user (medium/medium preset)
         )
     )
     task_report = asyncio.create_task(schedule_daily_report(app, chat_ids))
@@ -219,10 +285,33 @@ async def main():
         lambda t: logger.error(f"schedule_daily_report stopped: {t.exception()}") if t.exception() else None
     )
 
-    # Telegram polling
+    # Telegram: WebHook or Polling?
+    use_webhook = bool(webhook_url and webhook_url.strip())
+    
     await app.initialize()
     await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
+    
+    if use_webhook:
+        logger.info(f"WebHook mode: url={webhook_url} port={webhook_port}")
+        try:
+            await app.bot.set_webhook(url=webhook_url, drop_pending_updates=True)
+            logger.success(f"WebHook set: {webhook_url}")
+        except Exception as exc:
+            logger.error(f"WebHook setup failed: {exc}")
+            use_webhook = False
+    
+    if use_webhook:
+        # Webhook mode: use run_webhook instead of polling
+        await app.run_webhook(
+            listen="0.0.0.0",
+            port=webhook_port,
+            webhook_url=webhook_url,
+            drop_pending_updates=True,
+        )
+    else:
+        # Fallback to polling if webhook not configured
+        logger.info("Polling mode: WEBHOOK_URL not set, falling back to polling")
+        await app.updater.start_polling(drop_pending_updates=True)
 
     # Graceful shutdown için sinyal yakalama
     stop_event = asyncio.Event()
@@ -252,10 +341,18 @@ async def main():
     except asyncio.CancelledError:
         pass
 
-    await app.updater.stop()
+    if use_webhook:
+        try:
+            await app.bot.delete_webhook(drop_pending_updates=True)
+        except Exception as exc:
+            logger.warning(f"WebHook delete failed: {exc}")
+    else:
+        await app.updater.stop()
+    
     await app.stop()
     await app.shutdown()
     await client.close_connection()
+    logger.info("Bot shutdown complete.")
 
 
 if __name__ == "__main__":

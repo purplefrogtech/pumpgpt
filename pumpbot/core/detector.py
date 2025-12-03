@@ -9,6 +9,8 @@ from loguru import logger
 
 from pumpbot.core.analyzer import SignalPayload, analyze_symbol_midterm
 from pumpbot.core.state import last_signal_time
+from pumpbot.telebot.user_settings import get_user_settings
+from pumpbot.core.presets import load_for as load_preset
 
 ALLOWED_INTERVALS = {"15m", "30m", "1h"}
 BASE_TIMEFRAME = os.getenv("TIMEFRAME", "15m")
@@ -29,27 +31,53 @@ def normalize_interval(interval: str) -> str:
     return interval
 
 
-async def scan_symbols(client, symbols: Iterable[str], interval: str, period_seconds: int, on_alert: Callable):
+async def scan_symbols(
+    client,
+    symbols: Iterable[str],
+    interval: str,
+    period_seconds: int,
+    on_alert: Callable,
+    user_id: Optional[int] = None,
+):
     """
     Mid-term scanner: leverages analyze_symbol_midterm for each symbol.
+    
+    Args:
+        client: Binance AsyncClient
+        symbols: List of symbols to scan
+        interval: Timeframe (15m, 30m, 1h)
+        period_seconds: Scan interval in seconds
+        on_alert: Callback function for signals
+        user_id: Optional user ID for user-specific settings (defaults to None for default preset)
     """
+    if user_id is None:
+        # Default user for backward compatibility
+        user_id = 0
+    
     base_tf = normalize_interval(interval or BASE_TIMEFRAME)
     htf_tf = normalize_interval(HTF_TIMEFRAME)
+    
+    # Load user settings and preset
+    user_settings = get_user_settings(user_id)
+    preset = load_preset(user_settings["horizon"], user_settings["risk"])
+    
+    logger.info(
+        f"Scanner starting | user_id={user_id} horizon={user_settings['horizon']} "
+        f"risk={user_settings['risk']} base_tf={base_tf} htf_tf={htf_tf} symbols={len(list(symbols))}"
+    )
 
     symbols_list = list(symbols)
-    logger.info(f"Scanner starting | base_tf={base_tf} htf_tf={htf_tf} symbols={len(symbols_list)}")
-
     semaphore = asyncio.Semaphore(max(1, SCAN_CONCURRENCY))
 
     async def process(sym: str):
         async with semaphore:
-            await _process_symbol(client, sym, base_tf, htf_tf, on_alert)
+            await _process_symbol(client, sym, base_tf, htf_tf, on_alert, preset)
 
     while True:
         loop_start = datetime.now(timezone.utc)
         tasks = [asyncio.create_task(process(sym)) for sym in symbols_list]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        for sym, res in zip(symbols_list, results):
+        for sym, res in zip(symbols_list, results, strict=False):
             if isinstance(res, Exception):
                 logger.error(f"{sym} scan task failed: {res}")
         elapsed = (datetime.now(timezone.utc) - loop_start).total_seconds()
@@ -59,10 +87,14 @@ async def scan_symbols(client, symbols: Iterable[str], interval: str, period_sec
             await asyncio.sleep(sleep_for)
 
 
-async def _process_symbol(client, symbol: str, base_tf: str, htf_tf: str, on_alert: Callable):
+async def _process_symbol(client, symbol: str, base_tf: str, htf_tf: str, on_alert: Callable, preset):
+    """Process a single symbol with user-specific preset."""
     last_ts = last_signal_time(symbol)
-    if last_ts and datetime.now(timezone.utc) - last_ts < timedelta(minutes=SYMBOL_INTERVAL_MINUTES):
-        remaining = timedelta(minutes=SYMBOL_INTERVAL_MINUTES) - (datetime.now(timezone.utc) - last_ts)
+    # Use cooldown from preset instead of hardcoded SYMBOL_INTERVAL_MINUTES
+    cooldown_minutes = preset.cooldown_minutes
+    
+    if last_ts and datetime.now(timezone.utc) - last_ts < timedelta(minutes=cooldown_minutes):
+        remaining = timedelta(minutes=cooldown_minutes) - (datetime.now(timezone.utc) - last_ts)
         logger.debug(f"{symbol} skipped due to per-symbol cooldown ({remaining}).")
         return
 
@@ -74,9 +106,15 @@ async def _process_symbol(client, symbol: str, base_tf: str, htf_tf: str, on_ale
         htf_timeframe=htf_tf,
         leverage=LEVERAGE,
         strategy=STRATEGY_NAME,
+        preset=preset,  # Pass user-specific preset
     )
     if not sig:
         logger.debug(f"{symbol} no midterm signal.")
+        return
+
+    # Mandatory: chart must exist for signal delivery
+    if not sig.chart_path:
+        logger.error(f"{symbol} signal blocked: chart generation failed")
         return
 
     payload = {
@@ -97,6 +135,7 @@ async def _process_symbol(client, symbol: str, base_tf: str, htf_tf: str, on_ale
         "risk_reward": sig.risk_reward,
         "swing_high": sig.swing_high,
         "swing_low": sig.swing_low,
+        "score": round(sig.score, 1) if sig.score is not None else None,  # Include dynamic score
     }
 
     mid_price = sum(sig.entry) / len(sig.entry) if sig.entry else 0.0

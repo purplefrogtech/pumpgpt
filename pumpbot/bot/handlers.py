@@ -13,6 +13,12 @@ from pumpbot.core.daily_report import generate_daily_report
 from pumpbot.core.database import get_open_trades, last_signals, pnl_summary, recent_trades
 from pumpbot.telebot.auth import PAYWALL_MESSAGE, contact_keyboard, is_vip, vip_required
 from pumpbot.telebot.notifier import format_daily_report_caption, send_vip_signal
+from pumpbot.telebot.user_settings import (
+    get_user_settings,
+    update_user_settings,
+    get_horizon_name,
+    get_risk_name,
+)
 
 
 def _ids_from_env(raw: str) -> Sequence[int]:
@@ -272,4 +278,177 @@ def format_alert(p: dict) -> str:
         f"Fiyat: {p['price']}\n"
         f"TP1:{p['tp1']} | TP2:{p['tp2']} | SL:{p['sl']}\n"
         f"Skor: {p['score']:.2f} | {p['trend']}"
+    )
+
+
+# ============== NEW COMMANDS: HORIZON + RISK SETTINGS ==============
+
+
+@vip_required
+async def cmd_sethorizon(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set time horizon for user: short, medium, long"""
+    user = update.effective_user
+    chat = update.effective_chat
+    
+    if not user or not chat:
+        return
+    
+    # Parse argument
+    if not context.args or len(context.args) < 1:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="❌ Kullanım: /sethorizon short | medium | long",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    
+    horizon = context.args[0].lower()
+    
+    if horizon not in ["short", "medium", "long"]:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="❌ Geçersiz vade. Kullanın: short, medium, long",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    
+    # Update settings
+    success = update_user_settings(user.id, "horizon", horizon)
+    
+    if success:
+        horizon_name = get_horizon_name(horizon)
+        msg = (
+            f"📌 <b>Vade Ayarı Güncellendi</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Yeni vade: <b>{horizon_name}</b>\n\n"
+            f"Artık bot seçilen vade için analiz yapacak."
+        )
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=msg,
+            parse_mode=ParseMode.HTML,
+        )
+        logger.info(f"User {user.id} set horizon to {horizon}")
+    else:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="❌ Ayar kaydedilirken hata oluştu.",
+            parse_mode=ParseMode.HTML,
+        )
+
+
+@vip_required
+async def cmd_setrisk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set risk level for user: low, medium, high"""
+    user = update.effective_user
+    chat = update.effective_chat
+    
+    if not user or not chat:
+        return
+    
+    # Parse argument
+    if not context.args or len(context.args) < 1:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="❌ Kullanım: /setrisk low | medium | high",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    
+    risk = context.args[0].lower()
+    
+    if risk not in ["low", "medium", "high"]:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="❌ Geçersiz risk. Kullanın: low, medium, high",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    
+    # Update settings
+    success = update_user_settings(user.id, "risk", risk)
+    
+    if success:
+        risk_name = get_risk_name(risk)
+        
+        # Describe what this means
+        descriptions = {
+            "low": "Çok az sinyal, yüksek güvenilirlik",
+            "medium": "Dengeli sinyal ve güvenilirlik",
+            "high": "Sık sinyal, daha az güvenilirlik",
+        }
+        
+        msg = (
+            f"⚙️ <b>Risk Seviyesi Güncellendi</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Yeni risk: <b>{risk_name}</b>\n\n"
+            f"💡 Açıklama: {descriptions.get(risk, '')}"
+        )
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=msg,
+            parse_mode=ParseMode.HTML,
+        )
+        logger.info(f"User {user.id} set risk to {risk}")
+    else:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text="❌ Ayar kaydedilirken hata oluştu.",
+            parse_mode=ParseMode.HTML,
+        )
+
+
+@vip_required
+async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show user's profile and settings"""
+    user = update.effective_user
+    chat = update.effective_chat
+    
+    if not user or not chat:
+        return
+    
+    settings = get_user_settings(user.id)
+    horizon = settings.get("horizon", "medium")
+    risk = settings.get("risk", "medium")
+    
+    horizon_name = get_horizon_name(horizon)
+    risk_name = get_risk_name(risk)
+    
+    # Get timeframes based on horizon
+    from pumpbot.telebot.user_settings import get_timeframes_for_horizon
+    timeframes = get_timeframes_for_horizon(horizon)
+    tf_str = " – ".join(timeframes)
+    
+    # Describe signal intensity
+    signal_intensity = {
+        ("short", "low"): ("Çok Düşük", "Yüksek"),
+        ("short", "medium"): ("Düşük", "Yüksek"),
+        ("short", "high"): ("Yüksek", "Orta"),
+        ("medium", "low"): ("Düşük", "Yüksek"),
+        ("medium", "medium"): ("Orta", "Orta"),
+        ("medium", "high"): ("Yüksek", "Orta"),
+        ("long", "low"): ("Çok Düşük", "Yüksek"),
+        ("long", "medium"): ("Düşük", "Orta"),
+        ("long", "high"): ("Orta", "Orta"),
+    }
+    intensity, reliability = signal_intensity.get((horizon, risk), ("?", "?"))
+    
+    msg = (
+        f"👤 <b>Kullanıcı Profili</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 Vade: <b>{horizon_name}</b>\n"
+        f"⚖️  Risk: <b>{risk_name}</b>\n\n"
+        f"📊 <b>Analiz Ayarları</b>\n"
+        f"⏱ Timeframe: {tf_str}\n"
+        f"📈 Sinyal Yoğunluğu: {intensity}\n"
+        f"🛡 Güvenilirlik: {reliability}\n\n"
+        f"💡 <b>Ayarları Değiştir</b>:\n"
+        f"  /sethorizon &lt;short|medium|long&gt;\n"
+        f"  /setrisk &lt;low|medium|high&gt;"
+    )
+    
+    await context.bot.send_message(
+        chat_id=chat.id,
+        text=msg,
+        parse_mode=ParseMode.HTML,
     )
