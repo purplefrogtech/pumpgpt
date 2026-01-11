@@ -4,7 +4,7 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from statistics import mean
-from typing import List, Literal, Optional, Sequence
+from typing import List, Literal, Optional, Sequence, Tuple
 
 from binance import AsyncClient
 from loguru import logger
@@ -174,28 +174,28 @@ async def analyze_symbol_midterm(
     leverage: int = 10,
     strategy: str = "PUMP-GPT Midterm",
     preset=None,
-) -> Optional[SignalPayload]:
+) -> Tuple[Optional[SignalPayload], Optional[float]]:
     base_tf = base_timeframe
     htf_tf = htf_timeframe
     base_raw = await _fetch_klines(client, symbol, base_tf, limit=150)
     htf_raw = await _fetch_klines(client, symbol, htf_tf, limit=150)
 
     if not base_raw or not htf_raw:
-        return None
+        return None, None
 
     base_close, base_high, base_low, base_vol = _extract_lists(base_raw)
     htf_close, htf_high, htf_low, htf_vol = _extract_lists(htf_raw)
 
     if len(base_close) < 60 or len(htf_close) < 60:
         logger.debug(f"{symbol} insufficient data base={len(base_close)} htf={len(htf_close)}")
-        return None
+        return None, (base_close[-1] if base_close else None)
 
     # HTF trend
     ema20_htf = ema(htf_close, 20)
     ema50_htf = ema(htf_close, 50)
     ema100_htf = ema(htf_close, 100)
     if len(ema20_htf) < 1 or len(ema100_htf) < 1:
-        return None
+        return None, base_close[-1] if base_close else None
     
     # Determine trend from HTF EMAs - more flexible detection
     trend = None
@@ -218,14 +218,14 @@ async def analyze_symbol_midterm(
     else:
         # No clear trend (consolidation) - allow analysis but mark weak trend
         logger.debug(f"{symbol} No clear HTF trend, skipping")
-        return None
+        return None, htf_close_now
 
     # Base indicators
     ema20 = ema(base_close, 20)
     ema50 = ema(base_close, 50)
     atr_vals = atr(base_high, base_low, base_close, period=14)
     if len(ema20) < 1 or len(atr_vals) < 100:
-        return None
+        return None, base_close[-1]
 
     atr_now = atr_vals[-1]
     atr_mean = mean(atr_vals[-100:])
@@ -236,15 +236,15 @@ async def analyze_symbol_midterm(
     atr_max_factor = 2.0 if adaptive else 1.8
     if atr_now < atr_min_factor * atr_mean or atr_now > atr_max_factor * atr_mean:
         logger.debug(f"{symbol} ATR filter fail (now {atr_now:.6f}, mean {atr_mean:.6f}) adaptive={adaptive}")
-        return None
+        return None, base_close[-1]
 
     vol_ma = rolling_mean(base_vol, 20)
     vol_now = base_vol[-1] if base_vol else 0.0
     vol_ratio = (vol_now / vol_ma) if vol_ma else 0.0
-    vol_threshold = 1.2 if adaptive else 1.5
+    vol_threshold = 1.2 if adaptive else 1.25
     if vol_ratio < vol_threshold:
         logger.debug(f"{symbol} volume spike missing ratio={vol_ratio:.2f} need>={vol_threshold}")
-        return None
+        return None, base_close[-1]
 
     swing_high, swing_low = find_last_swing(base_high, base_low, lookback=40)
     close_now = base_close[-1]
@@ -271,7 +271,7 @@ async def analyze_symbol_midterm(
             sl = (swing_high if swing_high is not None else close_now + 1.5 * atr_now) + 0.25 * atr_now
 
     if side is None or sl is None:
-        return None
+        return None, close_now
 
     # Compute SignalComponents for dynamic scoring (if preset provided)
     trend_strength = 0.0
@@ -388,4 +388,4 @@ async def analyze_symbol_midterm(
 
     # adaptive reset
     record_signal(symbol, payload.created_at)
-    return payload
+    return payload, close_now

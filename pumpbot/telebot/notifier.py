@@ -18,7 +18,7 @@ def _parse_chat_ids(chat_ids_csv: str) -> List[int]:
         try:
             chat_ids.append(int(token))
         except ValueError:
-            logger.warning(f"Geçersiz chat_id atlandı: {token}")
+            logger.warning(f"Invalid chat_id ignored: {token}")
     return chat_ids
 
 
@@ -27,7 +27,7 @@ def _format_price(value) -> str:
         return "-"
     try:
         num = float(value)
-    except (TypeError, ValueError):
+    except (ValueError, TypeError):
         return str(value)
     if abs(num) >= 100:
         return f"{num:,.2f}"
@@ -57,19 +57,15 @@ def _fmt_pct(val, signed: bool = True) -> str:
 
 
 def _tp_lines(levels: Sequence[float]) -> List[str]:
-    medals = ["🥇", "🥈", "🥉"]
     lines: List[str] = []
     for idx, tp in enumerate(levels, start=1):
-        medal = medals[idx - 1] if idx - 1 < len(medals) else "🎯"
-        lines.append(f"{medal} <b>TP {idx}</b>: <code>{_format_price(tp)}</code>")
+        lines.append(f"- <b>TP {idx}</b>: <code>{_format_price(tp)}</code>")
     return lines
 
 
 def format_signal_message(payload: dict) -> str:
     symbol = payload.get("symbol", "-")
-    side_raw = str(payload.get("side", "")).upper()
-    side_icon = "🟢" if side_raw == "LONG" else "🔴"
-    side = side_raw or "-"
+    side = str(payload.get("side", "")).upper() or "-"
     leverage = payload.get("leverage", "-")
     timeframe = payload.get("timeframe", "-")
     strategy = payload.get("strategy", "-")
@@ -96,31 +92,32 @@ def format_signal_message(payload: dict) -> str:
     entry_lines = [f"{idx}) <code>{_format_price(entry)}</code>" for idx, entry in enumerate(entries, start=1)] or ["-"]
     tp_lines = _tp_lines(tp_levels) if tp_levels else []
 
+    rsi_text = f"{rsi_val:.1f}" if isinstance(rsi_val, (int, float)) else "-"
+    atr_text = _fmt_pct((atr_pct or 0) * 100, signed=False) if atr_pct is not None else "-"
+    volume_text = _fmt_pct(volume_change_pct)
+    success_text = _fmt_pct(success_rate, signed=False)
+    rr_text = f"{risk_reward:.2f}" if risk_reward is not None else "-"
+
     lines = [
-        "💎 <b>PUMP•GPT VIP SIGNAL</b>",
-        "━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"📌 <b>{html.escape(str(symbol))}</b> · {side_icon} <b>{side}</b> · {leverage}x",
-        f"⏱ Timeframe: {html.escape(str(timeframe))} · Strateji: {html.escape(str(strategy))}",
+        "<b>PumpGPT VIP Signal</b>",
+        f"<b>{html.escape(str(symbol))}</b> | <b>{side}</b> | {leverage}x | TF {html.escape(str(timeframe))}",
+        f"Strategy: {html.escape(str(strategy))}",
         "",
-        "🎯 <b>Entry Bölgesi</b>",
+        "<b>Entry Zone</b>",
         *entry_lines,
         "",
         *tp_lines,
-        f"🛑 <b>Stop Loss</b>: <code>{_format_price(stop_loss)}</code>",
+        f"<b>Stop Loss</b>: <code>{_format_price(stop_loss)}</code>",
         "",
-        f"📈 Trend: {trend_label}",
-        f"📊 RSI: {rsi_val:.1f}" if isinstance(rsi_val, (int, float)) else f"📊 RSI: {rsi_val or '-'}",
-        f"🌡 ATR: {_fmt_pct((atr_pct or 0) * 100, signed=False)}" if atr_pct is not None else "🌡 ATR: -",
-        f"📦 Volume: {_fmt_pct(volume_change_pct)}",
-        (
-            f"🎯 Success(30): {_fmt_pct(success_rate, signed=False)} | R:R {risk_reward:.2f}"
-            if risk_reward is not None
-            else f"🎯 Success(30): {_fmt_pct(success_rate, signed=False)}"
-        ),
+        f"Trend: {trend_label}",
+        f"RSI: {rsi_text}",
+        f"ATR: {atr_text}",
+        f"Volume: {volume_text}",
+        f"Win-rate(30): {success_text} | R:R {rr_text}",
         "",
-        f"📊 Sinyal Zamanı: <code>{created_at}</code>",
+        f"Signal time: <code>{created_at}</code>",
         "",
-        "⚠️ <i>Kripto piyasaları yüksek risk içerir. İşlemler yatırım tavsiyesi değildir.</i>",
+        "<i>Educational signals only. This is not financial advice.</i>",
     ]
 
     return "\n".join([line for line in lines if line is not None])
@@ -128,7 +125,7 @@ def format_signal_message(payload: dict) -> str:
 
 def format_daily_report_caption(summary: str) -> str:
     safe_summary = html.escape(summary.strip())
-    return f"📆 <b>PUMP•GPT Gün Sonu VIP Raporu</b>\n━━━━━━━━━━━━━━━━━━━━━━━━\n{safe_summary}\n\n⚠️ İşlemler yatırım tavsiyesi değildir."
+    return f"<b>PumpGPT Daily VIP Report</b>\n{safe_summary}\n\n<i>This is not financial advice.</i>"
 
 
 async def send_vip_signal(app, chat_ids_csv: str, payload: dict) -> None:

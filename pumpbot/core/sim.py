@@ -103,13 +103,13 @@ class SimEngine:
 
         stop_dist = abs(entry - sl)
         if stop_dist <= 0:
-            logger.warning(f"{symbol} için stop mesafesi 0! Pozisyon açılmadı.")
+            logger.warning(f"{symbol} stop distance is zero; trade not opened.")
             return
 
         risk_usd = self.cfg.equity_usd * (self.cfg.risk_pct / 100.0)
         qty = risk_usd / stop_dist
         if qty <= 0:
-            logger.warning(f"{symbol} için hesaplanan miktar <= 0! Pozisyon açılmadı.")
+            logger.warning(f"{symbol} qty <= 0; trade not opened.")
             return
 
         size_usd = qty * entry
@@ -119,7 +119,7 @@ class SimEngine:
             symbol=symbol,
             side=side,
             entry=entry,
-            size_usd=size_usd,
+            size=size_usd,
             qty=qty,
             tp1=tp1,
             tp2=tp2,
@@ -127,8 +127,11 @@ class SimEngine:
             opened_at=now,
         )
 
-        txt = f"🚀 <b>{side} OPEN</b> {symbol}\nEntry:{entry:.4f} SL:{sl:.4f} TP1:{tp1:.4f} TP2:{tp2:.4f}"
-        logger.info(txt.replace("<b>", "").replace("</b>", ""))
+        txt = (
+            f"{side} OPEN {symbol}\n"
+            f"Entry:{entry:.4f} SL:{sl:.4f} TP1:{tp1:.4f} TP2:{tp2:.4f}"
+        )
+        logger.info(txt)
         await self._notify_if(txt)
 
     async def on_tick(self, symbol: str, last_price: float):
@@ -155,7 +158,6 @@ class SimEngine:
             if sym != symbol:
                 continue
 
-            # SHORT
             if side == "SHORT":
                 if last_price <= tp2:
                     await self._final_close(
@@ -199,10 +201,8 @@ class SimEngine:
                             last_price,
                             datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                         )
-                        await self._notify_if(f"🎯 TP1 HIT SHORT {sym} +${realized:.2f}")
-                        # BE policy handled in final close
+                        await self._notify_if(f"TP1 HIT SHORT {sym} +${realized:.2f}")
 
-            # LONG
             if side == "LONG":
                 if last_price >= tp2:
                     await self._final_close(
@@ -246,8 +246,7 @@ class SimEngine:
                             last_price,
                             datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                         )
-                        await self._notify_if(f"🎯 TP1 HIT LONG {sym} +${realized:.2f}")
-                        # BE explanation handled in final close
+                        await self._notify_if(f"TP1 HIT LONG {sym} +${realized:.2f}")
 
     # -------- Closing & total PnL --------
     def _compute_total_pnl(
@@ -323,7 +322,7 @@ class SimEngine:
         pnl_pct = (total_pnl / size_usd * 100.0) if size_usd else 0.0
 
         await self._notify_if(
-            f"✅ {symbol} {reason} | Exit:{exit_price} | PnL ${total_pnl:.2f} ({pnl_pct:.2f}%)"
+            f"{symbol} {reason} | Exit:{exit_price} | PnL ${total_pnl:.2f} ({pnl_pct:.2f}%)"
         )
         trade_close_all(
             symbol,

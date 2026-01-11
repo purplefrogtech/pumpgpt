@@ -37,6 +37,7 @@ async def scan_symbols(
     interval: str,
     period_seconds: int,
     on_alert: Callable,
+    on_tick: Optional[Callable[[str, float], None]] = None,
     user_id: Optional[int] = None,
 ):
     """
@@ -48,6 +49,7 @@ async def scan_symbols(
         interval: Timeframe (15m, 30m, 1h)
         period_seconds: Scan interval in seconds
         on_alert: Callback function for signals
+        on_tick: Optional callback to advance simulator with latest price
         user_id: Optional user ID for user-specific settings (defaults to None for default preset)
     """
     if user_id is None:
@@ -63,15 +65,16 @@ async def scan_symbols(
     
     logger.info(
         f"Scanner starting | user_id={user_id} horizon={user_settings['horizon']} "
-        f"risk={user_settings['risk']} base_tf={base_tf} htf_tf={htf_tf} symbols={len(list(symbols))}"
+        f"risk={user_settings['risk']} base_tf={base_tf} htf_tf={htf_tf}"
     )
 
     symbols_list = list(symbols)
+    logger.info(f"Total symbols loaded: {len(symbols_list)}")
     semaphore = asyncio.Semaphore(max(1, SCAN_CONCURRENCY))
 
     async def process(sym: str):
         async with semaphore:
-            await _process_symbol(client, sym, base_tf, htf_tf, on_alert, preset)
+            await _process_symbol(client, sym, base_tf, htf_tf, on_alert, preset, on_tick)
 
     while True:
         loop_start = datetime.now(timezone.utc)
@@ -87,7 +90,15 @@ async def scan_symbols(
             await asyncio.sleep(sleep_for)
 
 
-async def _process_symbol(client, symbol: str, base_tf: str, htf_tf: str, on_alert: Callable, preset):
+async def _process_symbol(
+    client,
+    symbol: str,
+    base_tf: str,
+    htf_tf: str,
+    on_alert: Callable,
+    preset,
+    on_tick: Optional[Callable[[str, float], None]],
+):
     """Process a single symbol with user-specific preset."""
     last_ts = last_signal_time(symbol)
     # Use cooldown from preset instead of hardcoded SYMBOL_INTERVAL_MINUTES
@@ -99,7 +110,8 @@ async def _process_symbol(client, symbol: str, base_tf: str, htf_tf: str, on_ale
         return
 
     logger.info(f"Scanning symbol: {symbol} @{base_tf}")
-    sig: Optional[SignalPayload] = await analyze_symbol_midterm(
+    sig: Optional[SignalPayload]
+    sig, last_price = await analyze_symbol_midterm(
         client=client,
         symbol=symbol,
         base_timeframe=base_tf,
@@ -108,6 +120,11 @@ async def _process_symbol(client, symbol: str, base_tf: str, htf_tf: str, on_ale
         strategy=STRATEGY_NAME,
         preset=preset,  # Pass user-specific preset
     )
+    if on_tick and last_price is not None:
+        try:
+            await on_tick(symbol, float(last_price))
+        except Exception as exc:
+            logger.error(f"{symbol} on_tick failed: {exc}")
     if not sig:
         logger.debug(f"{symbol} no midterm signal.")
         return

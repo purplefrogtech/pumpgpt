@@ -17,7 +17,7 @@ MIN_RSI = float(os.getenv("MIN_RSI", "30"))
 MAX_RSI = float(os.getenv("MAX_RSI", "70"))
 MIN_ATR_PCT = float(os.getenv("MIN_ATR_PCT", "0.000075"))  # 50% less than before (0.00015 → 0.000075)
 MIN_VOLUME_RATIO = float(os.getenv("MIN_VOLUME_RATIO", "1.2"))  # Relaxed from 1.05 to 1.2 (20% spike)
-MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.01"))  # 1%
+MAX_SPREAD_PCT = float(os.getenv("MAX_SPREAD_PCT", "0.004"))  # 0.4%
 MIN_SUCCESS_RATE = float(os.getenv("MIN_SUCCESS_RATE", "25"))
 VOLUME_SPIKE_THRESHOLD = float(os.getenv("VOLUME_SPIKE_THRESHOLD", "1.2"))  # Relaxed from 1.5 → 1.2
 
@@ -104,8 +104,9 @@ def should_emit_signal(payload: Dict, market_data: Dict) -> bool:
     if success_rate < MIN_SUCCESS_RATE:
         logger.debug(f"[FILTER] {symbol} low success rate: {success_rate:.1f}% (soft warning)")
 
+    rsi_display = f"{rsi_val:.1f}" if rsi_val is not None else "N/A"
     logger.success(
-        f"[FILTER] {symbol} PASS | R:R={risk_reward:.2f} RSI={rsi_val:.1f if rsi_val else 'N/A'} "
+        f"[FILTER] {symbol} PASS | R:R={risk_reward:.2f} RSI={rsi_display} "
         f"ATR={atr_pct:.6f} VolSpike={volume_change_pct:.2f}% SR={success_rate:.1f}%"
     )
     return True

@@ -12,7 +12,7 @@ from pumpbot.core.debugger import debug_throttle
 
 STATE_PATH = Path("signal_throttle.json")
 _last_seen: Dict[str, datetime] = {}
-DEFAULT_THROTTLE_MINUTES = int(os.getenv("THROTTLE_MINUTES", "30"))
+DEFAULT_THROTTLE_MINUTES = int(os.getenv("THROTTLE_MINUTES", "5"))
 
 
 def _load_state() -> None:

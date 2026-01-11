@@ -18,12 +18,11 @@ def _vip_ids() -> Set[int]:
 
 CONTACT_USERNAME = "mehmetecetr"
 PAYWALL_MESSAGE = (
-    "💎 <b>PUMP•GPT VIP PANEL</b>\n"
-    "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    "Bu premium sinyal paneline erişiminiz bulunmuyor.\n\n"
-    "🔐 <b>Özel erişim için:</b>\n"
-    "Telegram: @mehmetecetr\n\n"
-    "Lütfen erişim talebi ve ödeme detayları için @mehmetecetr ile iletişime geçin."
+    "<b>PumpGPT VIP</b>\n"
+    "You do not have access to this premium panel.\n\n"
+    "<b>To request access:</b>\n"
+    f"Telegram: @{CONTACT_USERNAME}\n\n"
+    "Please contact for access and payment details."
 )
 
 
@@ -36,7 +35,7 @@ def contact_keyboard() -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton(
-                    text="💬 @mehmetecetr ile iletişime geç",
+                    text=f"Message @{CONTACT_USERNAME}",
                     url=f"https://t.me/{CONTACT_USERNAME}",
                 )
             ]

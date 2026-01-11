@@ -1,26 +1,25 @@
 """
 User Settings Manager
-Manages per-user horizon and risk settings with JSON persistence
+Manages per-user horizon and risk settings with JSON persistence.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, Optional, Literal
+from typing import Dict, Literal
 
 from loguru import logger
 
 SETTINGS_FILE = Path("telebot/user_settings.json")
 SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-# Type hints
 HorizonType = Literal["short", "medium", "long"]
 RiskType = Literal["low", "medium", "high"]
 
 
 def _ensure_file() -> None:
-    """Create settings file if not exists."""
+    """Create settings file if it does not exist."""
     if not SETTINGS_FILE.exists():
         SETTINGS_FILE.write_text("{}")
         logger.info(f"Created {SETTINGS_FILE}")
@@ -31,7 +30,6 @@ def load_settings() -> Dict[int, Dict]:
     _ensure_file()
     try:
         content = SETTINGS_FILE.read_text()
-        # Convert string keys to int
         data = json.loads(content) if content.strip() else {}
         return {int(k): v for k, v in data.items()}
     except Exception as exc:
@@ -43,7 +41,6 @@ def save_settings(data: Dict[int, Dict]) -> bool:
     """Save all user settings to JSON."""
     try:
         _ensure_file()
-        # Convert int keys to string for JSON
         json_data = {str(k): v for k, v in data.items()}
         SETTINGS_FILE.write_text(json.dumps(json_data, indent=2))
         return True
@@ -57,7 +54,6 @@ def get_user_settings(user_id: int) -> Dict:
     settings = load_settings()
     if user_id in settings:
         return settings[user_id]
-    # Return defaults
     return {
         "horizon": "medium",
         "risk": "medium",
@@ -69,42 +65,39 @@ def update_user_settings(user_id: int, key: str, value) -> bool:
     if key not in ["horizon", "risk"]:
         logger.warning(f"Invalid setting key: {key}")
         return False
-    
+
     settings = load_settings()
     if user_id not in settings:
         settings[user_id] = {
             "horizon": "medium",
             "risk": "medium",
         }
-    
-    # Validate values
+
     if key == "horizon" and value not in ["short", "medium", "long"]:
         logger.warning(f"Invalid horizon: {value}")
         return False
     if key == "risk" and value not in ["low", "medium", "high"]:
         logger.warning(f"Invalid risk: {value}")
         return False
-    
+
     settings[user_id][key] = value
     return save_settings(settings)
 
 
 def get_horizon_name(horizon: HorizonType) -> str:
-    """Get readable name for horizon."""
     names = {
-        "short": "KISA VADE (Scalp)",
-        "medium": "ORTA VADE (Swing)",
-        "long": "UZUN VADE (Trend)",
+        "short": "Short-term (Scalp)",
+        "medium": "Mid-term (Swing)",
+        "long": "Long-term (Trend)",
     }
     return names.get(horizon, horizon.upper())
 
 
 def get_risk_name(risk: RiskType) -> str:
-    """Get readable name for risk level."""
     names = {
-        "low": "DÜŞÜK RİSK",
-        "medium": "ORTA RİSK",
-        "high": "YÜKSEK RİSK",
+        "low": "Low Risk",
+        "medium": "Medium Risk",
+        "high": "High Risk",
     }
     return names.get(risk, risk.upper())
 
@@ -120,16 +113,8 @@ def get_timeframes_for_horizon(horizon: HorizonType) -> list[str]:
 
 
 if __name__ == "__main__":
-    # Test
-    print("Testing user_settings...")
-    
-    # Create test user
+    # Basic smoke test
     update_user_settings(123456789, "horizon", "long")
     update_user_settings(123456789, "risk", "high")
-    
-    # Load and print
     settings = get_user_settings(123456789)
-    print(f"User 123456789 settings: {settings}")
-    print(f"Horizon: {get_horizon_name(settings['horizon'])}")
-    print(f"Risk: {get_risk_name(settings['risk'])}")
-    print(f"Timeframes: {get_timeframes_for_horizon(settings['horizon'])}")
+    print(settings)

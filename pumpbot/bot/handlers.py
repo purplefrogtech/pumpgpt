@@ -14,10 +14,11 @@ from pumpbot.core.database import get_open_trades, last_signals, pnl_summary, re
 from pumpbot.telebot.auth import PAYWALL_MESSAGE, contact_keyboard, is_vip, vip_required
 from pumpbot.telebot.notifier import format_daily_report_caption, send_vip_signal
 from pumpbot.telebot.user_settings import (
-    get_user_settings,
-    update_user_settings,
     get_horizon_name,
     get_risk_name,
+    get_timeframes_for_horizon,
+    get_user_settings,
+    update_user_settings,
 )
 
 
@@ -32,7 +33,7 @@ def _ids_from_env(raw: str) -> Sequence[int]:
         try:
             ids.append(int(val))
         except ValueError:
-            logger.warning(f"Geçersiz chat_id atlandı: {val}")
+            logger.warning(f"Invalid chat_id ignored: {val}")
     return ids
 
 
@@ -58,20 +59,21 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     first = user.first_name or "VIP"
     msg = (
-        "💎 <b>PUMP•GPT VIP PANEL</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Hoş geldin {first}!\n"
-        "VIP durumun: <b>AKTİF</b>\n\n"
-        "Komutlar:\n"
-        "• /status  – Son sinyaller\n"
-        "• /symbols – İzlenen semboller\n"
-        "• /pnl     – PnL özeti\n"
-        "• /trades  – Son işlemler\n"
-        "• /config  – Konfigürasyon\n"
-        "• /report  – Gün sonu raporu\n"
-        "• /testsignal – Sistem sağlığı testi\n"
-        "• /health – Binance bağlantı sağlığı\n\n"
-        "Bol kazançlar!"
+        "<b>PumpGPT VIP</b>\n"
+        f"Welcome, {first}!\n"
+        "Your VIP access is active.\n\n"
+        "Commands:\n"
+        "- /status   recent signals\n"
+        "- /symbols  tracked symbols\n"
+        "- /pnl      PnL summary\n"
+        "- /trades   recent trades\n"
+        "- /config   current config\n"
+        "- /report   daily report now\n"
+        "- /testsignal test the formatter\n"
+        "- /health   connectivity check\n"
+        "- /sethorizon <short|medium|long>\n"
+        "- /setrisk <low|medium|high>\n"
+        "- /profile  show your settings"
     )
     await context.bot.send_message(chat_id=chat.id, text=msg, parse_mode=ParseMode.HTML)
 
@@ -80,12 +82,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = last_signals(limit=5)
     if not rows:
-        await update.message.reply_text("Henüz kayıtlı sinyal yok.", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("No signals recorded yet.", parse_mode=ParseMode.HTML)
         return
 
-    lines = ["🧭 <b>Son sinyaller</b>"]
+    lines = ["<b>Recent signals</b>"]
     for sym, price, vol, score, ts in rows:
-        lines.append(f"• {sym}: skor <b>{score:.2f}</b> | fiyat {price:.4f} | hacim {vol:.2f} | {ts}")
+        score_txt = f"{float(score):.2f}" if score is not None else "-"
+        price_txt = f"{float(price):.4f}" if price is not None else "-"
+        vol_txt = f"{float(vol):.2f}" if vol is not None else "-"
+        lines.append(f"- {sym}: score {score_txt} | price {price_txt} | volume {vol_txt} | {ts}")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
@@ -93,7 +98,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_symbols(update: Update, context: ContextTypes.DEFAULT_TYPE):
     symbols = context.bot_data.get("symbols", [])
     await update.message.reply_text(
-        "Takip edilen semboller: " + (", ".join(symbols) if symbols else "-"),
+        "Tracked symbols: " + (", ".join(symbols) if symbols else "-"),
         parse_mode=ParseMode.HTML,
     )
 
@@ -103,11 +108,11 @@ async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     s = pnl_summary()
     opens = get_open_trades()
     txt = (
-        "🧭 <b>PnL Özeti</b>\n"
-        f"KapalI işlem: {s['closed']}\n"
-        f"Kazanan/Kaybeden: {s['wins']}/{s['losses']} (Winrate {s['winrate']:.1f}%)\n"
-        f"Toplam PnL: ${s['pnl_usd']:.2f}\n"
-        f"Açık pozisyon: {len(opens)}"
+        "<b>PnL Summary</b>\n"
+        f"Closed trades: {s['closed']}\n"
+        f"Wins/Losses: {s['wins']}/{s['losses']} (Winrate {s['winrate']:.1f}%)\n"
+        f"Total PnL: ${s['pnl_usd']:.2f}\n"
+        f"Open positions: {len(opens)}"
     )
     await update.message.reply_text(txt, parse_mode=ParseMode.HTML)
 
@@ -116,28 +121,28 @@ async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = recent_trades(limit=10)
     if not rows:
-        await update.message.reply_text("İşlem kaydı yok.", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("No trades logged yet.", parse_mode=ParseMode.HTML)
         return
 
-    lines = ["🧭 <b>Son işlemler</b>"]
+    lines = ["<b>Recent trades</b>"]
     for sym, side, entry, tp1, tp2, sl, status, opened_at, closed_at, pnl_usd, pnl_pct in rows:
         tail = f" | PnL ${pnl_usd:.2f} ({pnl_pct:.2f}%)" if closed_at else ""
-        closed_info = f" → {closed_at}" if closed_at else ""
-        lines.append(f"• {sym} {side} @{entry} [{status}] {opened_at}{closed_info}{tail}")
+        closed_info = f" -> {closed_at}" if closed_at else ""
+        lines.append(f"- {sym} {side} @ {entry} [{status}] {opened_at}{closed_info}{tail}")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 @vip_required
 async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (
-        "🧭 <b>Ayarlar</b>\n"
-        f"MIN_SCORE={os.getenv('MIN_SCORE','40')}\n"
-        f"COOLDOWN_MINUTES={os.getenv('COOLDOWN_MINUTES','5')}\n"
-        f"ATR_MIN={os.getenv('ATR_MIN','0.0005')}\n"
-        f"MOM_MIN={os.getenv('MOM_MIN','0.10')}\n"
-        f"SIM_EQUITY_USD={os.getenv('SIM_EQUITY_USD','10000')}\n"
-        f"SIM_RISK_PER_TRADE_PCT={os.getenv('SIM_RISK_PER_TRADE_PCT','1.0')}\n"
-        f"THROTTLE_MINUTES={os.getenv('THROTTLE_MINUTES','10')}\n"
+        "<b>Config</b>\n"
+        f"TIMEFRAME={os.getenv('TIMEFRAME','15m')}\n"
+        f"HTF_TIMEFRAME={os.getenv('HTF_TIMEFRAME','1h')}\n"
+        f"SCAN_INTERVAL_SECONDS={os.getenv('SCAN_INTERVAL_SECONDS','60')}\n"
+        f"THROTTLE_MINUTES={os.getenv('THROTTLE_MINUTES','5')}\n"
+        f"MIN_RISK_REWARD={os.getenv('MIN_RISK_REWARD','1.2')}\n"
+        f"MIN_ATR_PCT={os.getenv('MIN_ATR_PCT','0.000075')}\n"
+        f"MIN_VOLUME_RATIO={os.getenv('MIN_VOLUME_RATIO','1.2')}\n"
         f"DEBUG_LEVEL={os.getenv('DEBUG_LEVEL','INFO')}"
     )
     await update.message.reply_text(txt, parse_mode=ParseMode.HTML)
@@ -176,7 +181,7 @@ async def cmd_testsignal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     timeframe = os.getenv("TEST_SIGNAL_TIMEFRAME", "15m")
     chat_ids_csv = os.getenv("TELEGRAM_CHAT_IDS", "")
 
-    status_lines = ["🧪 <b>PUMP•GPT TEST MODE</b>", "────────────────────────"]
+    status_lines = ["<b>PumpGPT Test Mode</b>", "Sending a mock signal..."]
 
     test_payload = {
         "symbol": symbol,
@@ -197,9 +202,9 @@ async def cmd_testsignal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     try:
         await send_vip_signal(app, chat_ids_csv, test_payload)
-        status_lines.append("✅ VIP Bildirim Sistemi: OK")
+        status_lines.append("VIP notification: OK")
     except Exception as exc:
-        status_lines.append(f"❌ VIP bildirim hatası: {exc}")
+        status_lines.append(f"VIP notification error: {exc}")
         logger.error(f"/testsignal notify error: {exc}")
 
     if chat_id:
@@ -220,21 +225,21 @@ async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE):
     client = context.application.bot_data.get("binance_client")
     symbols = context.application.bot_data.get("symbols") or []
     symbol = symbols[0] if symbols else "BTCUSDT"
-    lines = ["🩺 <b>Health Check</b>"]
+    lines = ["<b>Health Check</b>"]
     if not client:
-        lines.append("❌ Binance client yok")
+        lines.append("Binance client missing")
     else:
         try:
             server_time = await client.get_server_time()
             ts = datetime.fromtimestamp(server_time["serverTime"] / 1000, tz=timezone.utc)
-            lines.append(f"✅ Binance OK | Server Time: {ts.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            lines.append(f"Binance OK | Server Time: {ts.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         except Exception as exc:
-            lines.append(f"❌ Binance server time hatası: {exc}")
+            lines.append(f"Binance server time error: {exc}")
         try:
             klines = await client.get_klines(symbol=symbol, interval="15m", limit=50)
-            lines.append(f"✅ {symbol} 15m mum sayısı: {len(klines)}")
+            lines.append(f"{symbol} 15m candles fetched: {len(klines)}")
         except Exception as exc:
-            lines.append(f"❌ Kline hatası ({symbol}): {exc}")
+            lines.append(f"Kline fetch error ({symbol}): {exc}")
     if chat_id:
         await context.bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode=ParseMode.HTML)
 
@@ -251,11 +256,11 @@ async def notify_all(app, chat_ids_csv: str, text_or_payload):
         score_val = p.get("score")
         score_str = f"{float(score_val):.2f}" if score_val is not None else "-"
         msg_text = (
-            f"🧭 ALERT\n"
-            f"{p['symbol']}\n"
-            f"Fiyat: {p.get('price','-')}\n"
+            f"ALERT\n"
+            f"{p.get('symbol','?')}\n"
+            f"Price: {p.get('price','-')}\n"
             f"TP1: {p.get('tp1','-')} | TP2: {p.get('tp2','-')} | SL: {p.get('sl','-')}\n"
-            f"Skor: {score_str} | {p.get('trend','-')}"
+            f"Score: {score_str} | {p.get('trend','-')}"
         )
     else:
         p = None
@@ -268,20 +273,7 @@ async def notify_all(app, chat_ids_csv: str, text_or_payload):
                 with open(p["chart"], "rb") as f:
                     await app.bot.send_photo(chat_id=cid, photo=f)
         except Exception as exc:
-            logger.error(f"Mesaj gönderilemedi {cid}: {exc}")
-
-
-def format_alert(p: dict) -> str:
-    return (
-        f"🧭 PUMP ALERT\n"
-        f"{p['symbol']}\n"
-        f"Fiyat: {p['price']}\n"
-        f"TP1:{p['tp1']} | TP2:{p['tp2']} | SL:{p['sl']}\n"
-        f"Skor: {p['score']:.2f} | {p['trend']}"
-    )
-
-
-# ============== NEW COMMANDS: HORIZON + RISK SETTINGS ==============
+            logger.error(f"Message send failed {cid}: {exc}")
 
 
 @vip_required
@@ -289,50 +281,41 @@ async def cmd_sethorizon(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set time horizon for user: short, medium, long"""
     user = update.effective_user
     chat = update.effective_chat
-    
+
     if not user or not chat:
         return
-    
-    # Parse argument
+
     if not context.args or len(context.args) < 1:
         await context.bot.send_message(
             chat_id=chat.id,
-            text="❌ Kullanım: /sethorizon short | medium | long",
+            text="Usage: /sethorizon short|medium|long",
             parse_mode=ParseMode.HTML,
         )
         return
-    
+
     horizon = context.args[0].lower()
-    
     if horizon not in ["short", "medium", "long"]:
         await context.bot.send_message(
             chat_id=chat.id,
-            text="❌ Geçersiz vade. Kullanın: short, medium, long",
+            text="Invalid horizon. Use: short, medium, long",
             parse_mode=ParseMode.HTML,
         )
         return
-    
-    # Update settings
+
     success = update_user_settings(user.id, "horizon", horizon)
-    
     if success:
         horizon_name = get_horizon_name(horizon)
         msg = (
-            f"📌 <b>Vade Ayarı Güncellendi</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Yeni vade: <b>{horizon_name}</b>\n\n"
-            f"Artık bot seçilen vade için analiz yapacak."
+            "<b>Horizon Updated</b>\n"
+            f"New horizon: <b>{horizon_name}</b>\n"
+            "The scanner will adapt to this timeframe focus."
         )
-        await context.bot.send_message(
-            chat_id=chat.id,
-            text=msg,
-            parse_mode=ParseMode.HTML,
-        )
+        await context.bot.send_message(chat_id=chat.id, text=msg, parse_mode=ParseMode.HTML)
         logger.info(f"User {user.id} set horizon to {horizon}")
     else:
         await context.bot.send_message(
             chat_id=chat.id,
-            text="❌ Ayar kaydedilirken hata oluştu.",
+            text="Could not save the setting.",
             parse_mode=ParseMode.HTML,
         )
 
@@ -342,58 +325,46 @@ async def cmd_setrisk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set risk level for user: low, medium, high"""
     user = update.effective_user
     chat = update.effective_chat
-    
+
     if not user or not chat:
         return
-    
-    # Parse argument
+
     if not context.args or len(context.args) < 1:
         await context.bot.send_message(
             chat_id=chat.id,
-            text="❌ Kullanım: /setrisk low | medium | high",
+            text="Usage: /setrisk low|medium|high",
             parse_mode=ParseMode.HTML,
         )
         return
-    
+
     risk = context.args[0].lower()
-    
     if risk not in ["low", "medium", "high"]:
         await context.bot.send_message(
             chat_id=chat.id,
-            text="❌ Geçersiz risk. Kullanın: low, medium, high",
+            text="Invalid risk. Use: low, medium, high",
             parse_mode=ParseMode.HTML,
         )
         return
-    
-    # Update settings
+
     success = update_user_settings(user.id, "risk", risk)
-    
     if success:
-        risk_name = get_risk_name(risk)
-        
-        # Describe what this means
         descriptions = {
-            "low": "Çok az sinyal, yüksek güvenilirlik",
-            "medium": "Dengeli sinyal ve güvenilirlik",
-            "high": "Sık sinyal, daha az güvenilirlik",
+            "low": "Fewer signals, higher reliability.",
+            "medium": "Balanced frequency and quality.",
+            "high": "More signals, looser filters.",
         }
-        
+        risk_name = get_risk_name(risk)
         msg = (
-            f"⚙️ <b>Risk Seviyesi Güncellendi</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Yeni risk: <b>{risk_name}</b>\n\n"
-            f"💡 Açıklama: {descriptions.get(risk, '')}"
+            "<b>Risk Updated</b>\n"
+            f"New risk: <b>{risk_name}</b>\n"
+            f"{descriptions.get(risk, '')}"
         )
-        await context.bot.send_message(
-            chat_id=chat.id,
-            text=msg,
-            parse_mode=ParseMode.HTML,
-        )
+        await context.bot.send_message(chat_id=chat.id, text=msg, parse_mode=ParseMode.HTML)
         logger.info(f"User {user.id} set risk to {risk}")
     else:
         await context.bot.send_message(
             chat_id=chat.id,
-            text="❌ Ayar kaydedilirken hata oluştu.",
+            text="Could not save the setting.",
             parse_mode=ParseMode.HTML,
         )
 
@@ -403,50 +374,44 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user's profile and settings"""
     user = update.effective_user
     chat = update.effective_chat
-    
+
     if not user or not chat:
         return
-    
+
     settings = get_user_settings(user.id)
     horizon = settings.get("horizon", "medium")
     risk = settings.get("risk", "medium")
-    
+
     horizon_name = get_horizon_name(horizon)
     risk_name = get_risk_name(risk)
-    
-    # Get timeframes based on horizon
-    from pumpbot.telebot.user_settings import get_timeframes_for_horizon
     timeframes = get_timeframes_for_horizon(horizon)
-    tf_str = " – ".join(timeframes)
-    
-    # Describe signal intensity
+    tf_str = ", ".join(timeframes)
+
     signal_intensity = {
-        ("short", "low"): ("Çok Düşük", "Yüksek"),
-        ("short", "medium"): ("Düşük", "Yüksek"),
-        ("short", "high"): ("Yüksek", "Orta"),
-        ("medium", "low"): ("Düşük", "Yüksek"),
-        ("medium", "medium"): ("Orta", "Orta"),
-        ("medium", "high"): ("Yüksek", "Orta"),
-        ("long", "low"): ("Çok Düşük", "Yüksek"),
-        ("long", "medium"): ("Düşük", "Orta"),
-        ("long", "high"): ("Orta", "Orta"),
+        ("short", "low"): ("Very Low", "High"),
+        ("short", "medium"): ("Low", "High"),
+        ("short", "high"): ("High", "Medium"),
+        ("medium", "low"): ("Low", "High"),
+        ("medium", "medium"): ("Medium", "Medium"),
+        ("medium", "high"): ("High", "Medium"),
+        ("long", "low"): ("Very Low", "High"),
+        ("long", "medium"): ("Low", "Medium"),
+        ("long", "high"): ("Medium", "Medium"),
     }
     intensity, reliability = signal_intensity.get((horizon, risk), ("?", "?"))
-    
+
     msg = (
-        f"👤 <b>Kullanıcı Profili</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 Vade: <b>{horizon_name}</b>\n"
-        f"⚖️  Risk: <b>{risk_name}</b>\n\n"
-        f"📊 <b>Analiz Ayarları</b>\n"
-        f"⏱ Timeframe: {tf_str}\n"
-        f"📈 Sinyal Yoğunluğu: {intensity}\n"
-        f"🛡 Güvenilirlik: {reliability}\n\n"
-        f"💡 <b>Ayarları Değiştir</b>:\n"
-        f"  /sethorizon &lt;short|medium|long&gt;\n"
-        f"  /setrisk &lt;low|medium|high&gt;"
+        "<b>User Profile</b>\n"
+        f"Horizon: <b>{horizon_name}</b>\n"
+        f"Risk: <b>{risk_name}</b>\n\n"
+        f"Timeframes: {tf_str}\n"
+        f"Signal intensity: {intensity}\n"
+        f"Reliability: {reliability}\n\n"
+        "Update with:\n"
+        "/sethorizon <short|medium|long>\n"
+        "/setrisk <low|medium|high>"
     )
-    
+
     await context.bot.send_message(
         chat_id=chat.id,
         text=msg,
