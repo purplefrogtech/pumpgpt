@@ -59,24 +59,29 @@ async def scan_symbols(
     base_tf = normalize_interval(interval or BASE_TIMEFRAME)
     htf_tf = normalize_interval(HTF_TIMEFRAME)
     
-    # Load user settings and preset
-    user_settings = get_user_settings(user_id)
-    preset = load_preset(user_settings["horizon"], user_settings["risk"])
-    
-    logger.info(
-        f"Scanner starting | user_id={user_id} horizon={user_settings['horizon']} "
-        f"risk={user_settings['risk']} base_tf={base_tf} htf_tf={htf_tf}"
-    )
-
     symbols_list = list(symbols)
+    logger.info(f"Scanner starting | user_id={user_id} base_tf={base_tf} htf_tf={htf_tf}")
     logger.info(f"Total symbols loaded: {len(symbols_list)}")
     semaphore = asyncio.Semaphore(max(1, SCAN_CONCURRENCY))
+    last_profile = None
+    preset = None
 
     async def process(sym: str):
         async with semaphore:
             await _process_symbol(client, sym, base_tf, htf_tf, on_alert, preset, on_tick)
 
     while True:
+        user_settings = get_user_settings(user_id)
+        horizon = user_settings.get("horizon", "medium")
+        risk = user_settings.get("risk", "medium")
+        profile = (horizon, risk)
+        if profile != last_profile or preset is None:
+            preset = load_preset(horizon, risk)
+            last_profile = profile
+            logger.info(
+                f"Scanner profile | user_id={user_id} horizon={horizon} risk={risk} "
+                f"base_tf={base_tf} htf_tf={htf_tf}"
+            )
         loop_start = datetime.now(timezone.utc)
         tasks = [asyncio.create_task(process(sym)) for sym in symbols_list]
         results = await asyncio.gather(*tasks, return_exceptions=True)

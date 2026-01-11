@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
-from typing import Sequence
+from typing import Optional, Sequence
 
 from loguru import logger
 from telegram import Update
@@ -13,13 +13,84 @@ from pumpbot.core.daily_report import generate_daily_report
 from pumpbot.core.database import get_open_trades, last_signals, pnl_summary, recent_trades
 from pumpbot.telebot.auth import PAYWALL_MESSAGE, contact_keyboard, is_vip, vip_required
 from pumpbot.telebot.notifier import format_daily_report_caption, send_vip_signal
-from pumpbot.telebot.user_settings import (
-    get_horizon_name,
-    get_risk_name,
-    get_timeframes_for_horizon,
-    get_user_settings,
-    update_user_settings,
+from pumpbot.telebot.user_settings import get_horizon_name, get_risk_name, get_user_settings, update_user_settings
+
+BOT_COMMANDS = (
+    ("start", "Start the bot"),
+    ("help", "Show command menu"),
+    ("status", "Recent signals"),
+    ("symbols", "Tracked symbols"),
+    ("pnl", "PnL summary"),
+    ("trades", "Recent trades"),
+    ("config", "Show bot config"),
+    ("report", "Generate daily report"),
+    ("testsignal", "Send a mock signal"),
+    ("health", "Connectivity check"),
+    ("sethorizon", "Set horizon: short|medium|long"),
+    ("setrisk", "Set risk: low|medium|high"),
+    ("profile", "Show active settings"),
+    ("id", "Show your user/chat IDs"),
 )
+
+
+def _get_control_user_id(context: ContextTypes.DEFAULT_TYPE) -> int:
+    raw = context.application.bot_data.get("control_user_id")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _is_control_user(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    control_id = _get_control_user_id(context)
+    return control_id == 0 or control_id == user_id
+
+
+def _admin_only_notice(user_id: Optional[int], control_id: int) -> str:
+    lines = [
+        "<b>Admin Only</b>",
+        "This command changes global scanner settings.",
+    ]
+    if user_id is not None:
+        lines.append(f"Your user id: <code>{user_id}</code>")
+    if control_id:
+        lines.append(f"Control user id: <code>{control_id}</code>")
+    lines.append("Ask the bot owner or set CONTROL_USER_ID in .env.")
+    return "\n".join(lines)
+
+
+def _build_help_text(is_admin: bool) -> str:
+    lines = [
+        "<b>PumpGPT Commands</b>",
+        "",
+        "<b>Signals</b>",
+        "/status - Recent signals",
+        "/symbols - Tracked symbols",
+        "/report - Daily report now",
+        "",
+        "<b>Performance</b>",
+        "/pnl - PnL summary",
+        "/trades - Recent trades",
+        "",
+        "<b>Settings</b>",
+        "/profile - Active scanner settings",
+        "/sethorizon <short|medium|long> - Set horizon",
+        "/setrisk <low|medium|high> - Set risk",
+        "",
+        "<b>Diagnostics</b>",
+        "/health - Connectivity check",
+        "/config - Show bot config",
+        "/testsignal [here] - Send a mock signal",
+        "/id - Show your user/chat IDs",
+    ]
+    if not is_admin:
+        lines.extend(
+            [
+                "",
+                "<i>Admin-only: /sethorizon /setrisk /testsignal</i>",
+            ]
+        )
+    return "\n".join(lines)
 
 
 def _ids_from_env(raw: str) -> Sequence[int]:
@@ -58,31 +129,57 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     first = user.first_name or "VIP"
+    is_admin = _is_control_user(context, user.id)
     msg = (
         "<b>PumpGPT VIP</b>\n"
         f"Welcome, {first}!\n"
-        "Your VIP access is active.\n\n"
-        "Commands:\n"
-        "- /status   recent signals\n"
-        "- /symbols  tracked symbols\n"
-        "- /pnl      PnL summary\n"
-        "- /trades   recent trades\n"
-        "- /config   current config\n"
-        "- /report   daily report now\n"
-        "- /testsignal test the formatter\n"
-        "- /health   connectivity check\n"
-        "- /sethorizon <short|medium|long>\n"
-        "- /setrisk <low|medium|high>\n"
-        "- /profile  show your settings"
+        "Signals are monitored and sent to VIP chats.\n"
+        "Use /help to see all commands.\n\n"
+        "<b>Quick start</b>\n"
+        "/status - Recent signals\n"
+        "/profile - Active settings\n"
+        "/health - Connectivity check"
     )
+    if not is_admin:
+        msg += "\n\n<i>Admin-only: /sethorizon /setrisk /testsignal</i>"
     await context.bot.send_message(chat_id=chat.id, text=msg, parse_mode=ParseMode.HTML)
 
 
 @vip_required
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    if not message:
+        return
+    user = update.effective_user
+    is_admin = _is_control_user(context, user.id) if user else False
+    await message.reply_text(_build_help_text(is_admin), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+
+@vip_required
+async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    if not message:
+        return
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user and not chat:
+        return
+    lines = ["<b>IDs</b>"]
+    if user:
+        lines.append(f"User ID: <code>{user.id}</code>")
+    if chat:
+        lines.append(f"Chat ID: <code>{chat.id}</code>")
+    await message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+@vip_required
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    if not message:
+        return
     rows = last_signals(limit=5)
     if not rows:
-        await update.message.reply_text("No signals recorded yet.", parse_mode=ParseMode.HTML)
+        await message.reply_text("No signals recorded yet.", parse_mode=ParseMode.HTML)
         return
 
     lines = ["<b>Recent signals</b>"]
@@ -91,20 +188,32 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         price_txt = f"{float(price):.4f}" if price is not None else "-"
         vol_txt = f"{float(vol):.2f}" if vol is not None else "-"
         lines.append(f"- {sym}: score {score_txt} | price {price_txt} | volume {vol_txt} | {ts}")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    await message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 @vip_required
 async def cmd_symbols(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    if not message:
+        return
     symbols = context.bot_data.get("symbols", [])
-    await update.message.reply_text(
-        "Tracked symbols: " + (", ".join(symbols) if symbols else "-"),
+    if not symbols:
+        await message.reply_text("Tracked symbols: -", parse_mode=ParseMode.HTML)
+        return
+    max_show = 30
+    preview = ", ".join(symbols[:max_show])
+    suffix = " ..." if len(symbols) > max_show else ""
+    await message.reply_text(
+        f"Tracked symbols ({len(symbols)}): {preview}{suffix}",
         parse_mode=ParseMode.HTML,
     )
 
 
 @vip_required
 async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    if not message:
+        return
     s = pnl_summary()
     opens = get_open_trades()
     txt = (
@@ -114,14 +223,17 @@ async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Total PnL: ${s['pnl_usd']:.2f}\n"
         f"Open positions: {len(opens)}"
     )
-    await update.message.reply_text(txt, parse_mode=ParseMode.HTML)
+    await message.reply_text(txt, parse_mode=ParseMode.HTML)
 
 
 @vip_required
 async def cmd_trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    if not message:
+        return
     rows = recent_trades(limit=10)
     if not rows:
-        await update.message.reply_text("No trades logged yet.", parse_mode=ParseMode.HTML)
+        await message.reply_text("No trades logged yet.", parse_mode=ParseMode.HTML)
         return
 
     lines = ["<b>Recent trades</b>"]
@@ -129,23 +241,35 @@ async def cmd_trades(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tail = f" | PnL ${pnl_usd:.2f} ({pnl_pct:.2f}%)" if closed_at else ""
         closed_info = f" -> {closed_at}" if closed_at else ""
         lines.append(f"- {sym} {side} @ {entry} [{status}] {opened_at}{closed_info}{tail}")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+    await message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 @vip_required
 async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    if not message:
+        return
+    symbols = context.application.bot_data.get("symbols") or []
+    control_id = _get_control_user_id(context)
+    vip_ids = _ids_from_env(os.getenv("VIP_USER_IDS", ""))
+    chat_ids = _ids_from_env(os.getenv("TELEGRAM_CHAT_IDS", ""))
     txt = (
         "<b>Config</b>\n"
         f"TIMEFRAME={os.getenv('TIMEFRAME','15m')}\n"
         f"HTF_TIMEFRAME={os.getenv('HTF_TIMEFRAME','1h')}\n"
         f"SCAN_INTERVAL_SECONDS={os.getenv('SCAN_INTERVAL_SECONDS','60')}\n"
+        f"SCAN_CONCURRENCY={os.getenv('SCAN_CONCURRENCY','3')}\n"
         f"THROTTLE_MINUTES={os.getenv('THROTTLE_MINUTES','5')}\n"
         f"MIN_RISK_REWARD={os.getenv('MIN_RISK_REWARD','1.2')}\n"
         f"MIN_ATR_PCT={os.getenv('MIN_ATR_PCT','0.000075')}\n"
         f"MIN_VOLUME_RATIO={os.getenv('MIN_VOLUME_RATIO','1.2')}\n"
-        f"DEBUG_LEVEL={os.getenv('DEBUG_LEVEL','INFO')}"
+        f"DEBUG_LEVEL={os.getenv('DEBUG_LEVEL','INFO')}\n"
+        f"SYMBOLS_COUNT={len(symbols)}\n"
+        f"VIP_USER_IDS={len(vip_ids)}\n"
+        f"TELEGRAM_CHAT_IDS={len(chat_ids)}\n"
+        f"CONTROL_USER_ID={control_id if control_id else 'not set'}"
     )
-    await update.message.reply_text(txt, parse_mode=ParseMode.HTML)
+    await message.reply_text(txt, parse_mode=ParseMode.HTML)
 
 
 @vip_required
@@ -176,12 +300,31 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_testsignal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     chat_id = chat.id if chat else None
+    user = update.effective_user
     app = context.application
     symbol = os.getenv("TEST_SIGNAL_SYMBOL", "BTCUSDT").upper()
     timeframe = os.getenv("TEST_SIGNAL_TIMEFRAME", "15m")
     chat_ids_csv = os.getenv("TELEGRAM_CHAT_IDS", "")
 
-    status_lines = ["<b>PumpGPT Test Mode</b>", "Sending a mock signal..."]
+    control_id = _get_control_user_id(context)
+    if user and not _is_control_user(context, user.id):
+        if chat_id:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=_admin_only_notice(user.id, control_id),
+                parse_mode=ParseMode.HTML,
+            )
+        return
+
+    send_scope = "VIP list"
+    if context.args and context.args[0].lower() in {"here", "local", "me", "self"}:
+        if chat_id:
+            chat_ids_csv = str(chat_id)
+            send_scope = "this chat"
+        else:
+            send_scope = "VIP list (no chat id available)"
+
+    status_lines = ["<b>PumpGPT Test Mode</b>", f"Target: {send_scope}", "Sending a mock signal..."]
 
     test_payload = {
         "symbol": symbol,
@@ -285,6 +428,15 @@ async def cmd_sethorizon(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user or not chat:
         return
 
+    control_id = _get_control_user_id(context)
+    if not _is_control_user(context, user.id):
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=_admin_only_notice(user.id, control_id),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
     if not context.args or len(context.args) < 1:
         await context.bot.send_message(
             chat_id=chat.id,
@@ -302,16 +454,16 @@ async def cmd_sethorizon(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    success = update_user_settings(user.id, "horizon", horizon)
+    success = update_user_settings(control_id, "horizon", horizon)
     if success:
         horizon_name = get_horizon_name(horizon)
         msg = (
             "<b>Horizon Updated</b>\n"
             f"New horizon: <b>{horizon_name}</b>\n"
-            "The scanner will adapt to this timeframe focus."
+            "Applies to the global scanner."
         )
         await context.bot.send_message(chat_id=chat.id, text=msg, parse_mode=ParseMode.HTML)
-        logger.info(f"User {user.id} set horizon to {horizon}")
+        logger.info(f"User {user.id} set global horizon to {horizon} (control_id={control_id})")
     else:
         await context.bot.send_message(
             chat_id=chat.id,
@@ -327,6 +479,15 @@ async def cmd_setrisk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
 
     if not user or not chat:
+        return
+
+    control_id = _get_control_user_id(context)
+    if not _is_control_user(context, user.id):
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=_admin_only_notice(user.id, control_id),
+            parse_mode=ParseMode.HTML,
+        )
         return
 
     if not context.args or len(context.args) < 1:
@@ -346,7 +507,7 @@ async def cmd_setrisk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    success = update_user_settings(user.id, "risk", risk)
+    success = update_user_settings(control_id, "risk", risk)
     if success:
         descriptions = {
             "low": "Fewer signals, higher reliability.",
@@ -360,7 +521,7 @@ async def cmd_setrisk(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{descriptions.get(risk, '')}"
         )
         await context.bot.send_message(chat_id=chat.id, text=msg, parse_mode=ParseMode.HTML)
-        logger.info(f"User {user.id} set risk to {risk}")
+        logger.info(f"User {user.id} set global risk to {risk} (control_id={control_id})")
     else:
         await context.bot.send_message(
             chat_id=chat.id,
@@ -378,14 +539,16 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user or not chat:
         return
 
-    settings = get_user_settings(user.id)
+    control_id = _get_control_user_id(context)
+    settings = get_user_settings(control_id)
     horizon = settings.get("horizon", "medium")
     risk = settings.get("risk", "medium")
 
     horizon_name = get_horizon_name(horizon)
     risk_name = get_risk_name(risk)
-    timeframes = get_timeframes_for_horizon(horizon)
-    tf_str = ", ".join(timeframes)
+    base_tf = os.getenv("TIMEFRAME", "15m")
+    htf_tf = os.getenv("HTF_TIMEFRAME", "1h")
+    tf_str = f"{base_tf} (base), {htf_tf} (HTF)"
 
     signal_intensity = {
         ("short", "low"): ("Very Low", "High"),
@@ -403,7 +566,8 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "<b>User Profile</b>\n"
         f"Horizon: <b>{horizon_name}</b>\n"
-        f"Risk: <b>{risk_name}</b>\n\n"
+        f"Risk: <b>{risk_name}</b>\n"
+        "Scope: global scanner\n\n"
         f"Timeframes: {tf_str}\n"
         f"Signal intensity: {intensity}\n"
         f"Reliability: {reliability}\n\n"
@@ -411,6 +575,8 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/sethorizon <short|medium|long>\n"
         "/setrisk <low|medium|high>"
     )
+    if not _is_control_user(context, user.id):
+        msg += "\n\n<i>Only the bot owner can change these settings.</i>"
 
     await context.bot.send_message(
         chat_id=chat.id,

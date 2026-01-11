@@ -1,24 +1,10 @@
-from telegram import Update
-from telegram.ext import ContextTypes
+"""
+Legacy command handlers kept for compatibility.
+Prefer pumpbot.bot.handlers for active commands.
+"""
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🤖 *PumpGPT aktif!*\n\n"
-        "Binance sinyalleri dinleniyor ve anlık olarak Telegram’a gönderiliyor.",
-        parse_mode="Markdown"
-    )
+from pumpbot.bot.handlers import cmd_help as help
+from pumpbot.bot.handlers import cmd_start as start
+from pumpbot.bot.handlers import cmd_status as status
 
-async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📜 *Komutlar:*\n"
-        "/start - Botu başlatır\n"
-        "/status - Durum bilgisi\n"
-        "/help - Bu mesajı gösterir",
-        parse_mode="Markdown"
-    )
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "✅ Bot şu anda çalışıyor, Binance API bağlantısı aktif.",
-        parse_mode="Markdown"
-    )
+__all__ = ["start", "help", "status"]

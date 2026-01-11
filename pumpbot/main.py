@@ -3,17 +3,21 @@ import csv
 import os
 import signal
 from datetime import datetime, timedelta, timezone
-from typing import List
+from typing import List, Optional
 
 from binance import AsyncClient
 from dotenv import load_dotenv
 from loguru import logger
+from telegram import BotCommand
 from telegram.constants import ParseMode
 from telegram.ext import ApplicationBuilder, CommandHandler
 
 from pumpbot.bot.handlers import (
+    BOT_COMMANDS,
     cmd_config,
+    cmd_help,
     cmd_health,
+    cmd_id,
     cmd_pnl,
     cmd_profile,
     cmd_report,
@@ -96,6 +100,27 @@ def _parse_chat_ids(chat_ids_csv: str) -> List[int]:
         except ValueError:
             logger.warning(f"Invalid chat_id ignored: {token}")
     return ids
+
+
+def _first_id_from_csv(chat_ids_csv: str) -> Optional[int]:
+    ids = _parse_chat_ids(chat_ids_csv)
+    return ids[0] if ids else None
+
+
+def _resolve_control_user_id(chat_ids_csv: str) -> int:
+    raw_control = os.getenv("CONTROL_USER_ID", "").strip()
+    if raw_control:
+        try:
+            return int(raw_control)
+        except ValueError:
+            logger.warning(f"Invalid CONTROL_USER_ID ignored: {raw_control}")
+    vip_id = _first_id_from_csv(os.getenv("VIP_USER_IDS", ""))
+    if vip_id is not None:
+        return vip_id
+    chat_id = _first_id_from_csv(chat_ids_csv)
+    if chat_id is not None:
+        return chat_id
+    return 0
 
 
 def _build_symbols(env_symbols_csv: str) -> List[str]:
@@ -236,6 +261,12 @@ async def main():
     app = ApplicationBuilder().token(bot_token).build()
     app.bot_data["symbols"] = symbols
     app.bot_data["binance_client"] = client
+    control_user_id = _resolve_control_user_id(chat_ids)
+    app.bot_data["control_user_id"] = control_user_id
+    if control_user_id:
+        logger.info(f"Control user id set to {control_user_id}")
+    else:
+        logger.warning("Control user id not set; using global defaults")
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
@@ -249,6 +280,8 @@ async def main():
     app.add_handler(CommandHandler("sethorizon", cmd_sethorizon))
     app.add_handler(CommandHandler("setrisk", cmd_setrisk))
     app.add_handler(CommandHandler("profile", cmd_profile))
+    app.add_handler(CommandHandler("id", cmd_id))
+    app.add_handler(CommandHandler("whoami", cmd_id))
 
     async def sim_notifier(text):
         await notify_all(app, chat_ids, text)
@@ -319,7 +352,7 @@ async def main():
             scan_interval,
             on_alert,
             on_tick=sim.on_tick,
-            user_id=0,
+            user_id=control_user_id,
         )
     )
     task_report = asyncio.create_task(schedule_daily_report(app, chat_ids, hour=daily_hour, minute=daily_minute))
@@ -332,6 +365,11 @@ async def main():
     use_webhook = bool(webhook_url)
 
     await app.initialize()
+    try:
+        commands = [BotCommand(cmd, desc) for cmd, desc in BOT_COMMANDS]
+        await app.bot.set_my_commands(commands)
+    except Exception as exc:
+        logger.warning(f"Bot command registration failed: {exc}")
     await app.start()
     if use_webhook:
         from urllib.parse import urlparse
